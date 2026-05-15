@@ -113,7 +113,7 @@ Open Excel and create a file called `test_cases.xlsx` with these columns:
 - You do NOT need to write correct answers — the AI will do that in Step 3
 - Keep questions realistic — think about what a real lawyer or law firm client would ask
 
----
+---Hi i am testing git 
 
 ## Step 2 — Import your Excel file
 
