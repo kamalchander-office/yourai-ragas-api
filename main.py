@@ -30,6 +30,7 @@
 
 import logging   # lets us print timestamped messages to the terminal
 import os        # lets us read environment variables (from .env file)
+import sys
 
 from dotenv import load_dotenv
 # python-dotenv reads the .env file and makes its values available via os.environ
@@ -45,9 +46,6 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 # HTTPBearer = tells FastAPI to look for "Authorization: Bearer <token>" in headers
 # HTTPAuthorizationCredentials = the object that holds the token once extracted
 
-from openai import OpenAI
-# The official OpenAI Python SDK — lets us call GPT models
-
 from pydantic import BaseModel
 # Pydantic validates data shapes. If the QA team sends a request without a
 # 'question' field, Pydantic catches it and returns a clear error automatically.
@@ -58,10 +56,17 @@ from pydantic import BaseModel
 # load_dotenv() reads the .env file line by line and puts each value into
 # the process's environment variables — like putting sticky notes in memory.
 #
-# IMPORTANT: This must happen BEFORE we read os.environ["OPENAI_API_KEY"] below.
-# If we read the variable before loading the file, it won't exist yet.
+# IMPORTANT: This must happen BEFORE we read API keys from the environment below.
 
 load_dotenv()
+
+from llm import config as llm_config
+from llm.env_validate import (
+    is_gemini_placeholder,
+    is_openai_placeholder,
+    is_openrouter_placeholder,
+)
+from llm.router import chat, get_active_model
 
 # Set up logging so every request prints a timestamped line to the terminal.
 # Format example: "2026-05-13 10:32:11  INFO  Query received: What is habeas corpus?"
@@ -81,17 +86,32 @@ log = logging.getLogger(__name__)
 # it RAISES AN ERROR immediately if the key is missing — better to crash on
 # startup than to fail silently on the first real request.
 
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]   # The OpenAI secret key
-BEARER_TOKEN   = os.environ["API_BEARER_TOKEN"] # The password QA team sends with every request
-OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-# os.getenv() with a default = "use this value if the key doesn't exist"
-# gpt-4o-mini is cheap and fast — good for running many QA test cases
+BEARER_TOKEN = os.environ["API_BEARER_TOKEN"]  # The password QA team sends with every request
 
-# Create the OpenAI client ONCE here at startup.
-# Why not create it inside the route handler?
-# Because creating a client opens a network connection. Doing it once and reusing
-# it is much faster than recreating it for every single request.
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+# LLM_PROVIDER in .env selects openai | gemini | openrouter (see llm/router.py).
+if llm_config.LLM_PROVIDER == "gemini":
+    if is_gemini_placeholder(llm_config.GEMINI_API_KEY):
+        sys.exit(
+            "ERROR: GEMINI_API_KEY is missing or still a placeholder in .env.\n"
+            "Set LLM_PROVIDER=gemini and add a real Gemini API key."
+        )
+elif llm_config.LLM_PROVIDER == "openrouter":
+    if is_openrouter_placeholder(llm_config.OPENROUTER_API_KEY):
+        sys.exit(
+            "ERROR: OPENROUTER_API_KEY is missing or still a placeholder in .env.\n"
+            "Set LLM_PROVIDER=openrouter and add a real OpenRouter API key."
+        )
+elif is_openai_placeholder(llm_config.OPENAI_API_KEY):
+    sys.exit(
+        "ERROR: OPENAI_API_KEY is missing or still a placeholder in .env.\n"
+        "Add an OpenAI key or set LLM_PROVIDER=gemini / openrouter."
+    )
+
+log.info(
+    "LLM provider: %s (model: %s)",
+    llm_config.LLM_PROVIDER,
+    get_active_model(),
+)
 
 
 # ── STEP 2: CREATE THE FASTAPI APPLICATION ───────────────────────────────────
@@ -210,7 +230,7 @@ class QueryResponse(BaseModel):
     # RAGAs uses this field for faithfulness, context_precision, context_recall metrics.
 
     model: str
-    # Which OpenAI model produced this answer — for traceability in the QA report
+    # Which model produced this answer — for traceability in the QA report
 
 
 # ── STEP 5: ROUTE HANDLERS ───────────────────────────────────────────────────
@@ -273,35 +293,12 @@ def query(body: QueryRequest) -> QueryResponse:
         "If you do not know the answer, say so — do not guess."
     )
 
-    # ── Call OpenAI ───────────────────────────────────────────────────────────
-    #
-    # chat.completions.create is the standard ChatGPT API call.
-    # The "messages" list is the conversation history — same as what you see
-    # in ChatGPT under the hood:
-    #   - "system" role = the instructions / personality
-    #   - "user" role   = the question being asked
-    #   - "assistant" role = the AI's previous responses (not needed here since
-    #                         each QA call is a fresh, single-turn conversation)
-
-    response = openai_client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": system},      # instructions to the AI
-            {"role": "user",   "content": body.question}, # the actual question
-        ],
+    # ── Call configured LLM (OpenAI / Gemini / OpenRouter via llm.router) ───
+    answer = chat(
+        body.question,
+        system_text=system,
         temperature=0.2,
-        # temperature controls how creative/random the AI is.
-        # 0.0 = deterministic (same question always gives same answer)
-        # 1.0 = very creative/varied
-        # 0.2 = mostly consistent, slight variation — good for QA eval runs
-        #       because you want reproducible results across test cycles
     )
-
-    # Extract the answer text from OpenAI's response object
-    # response.choices[0] = the first (and usually only) completion
-    # .message.content = the actual text string
-    # "or ''" = fallback to empty string if content is None
-    answer = response.choices[0].message.content or ""
     log.info("Answer generated — %d characters", len(answer))
 
     # ── Return the response ───────────────────────────────────────────────────
@@ -314,5 +311,5 @@ def query(body: QueryRequest) -> QueryResponse:
         answer=answer,            # the AI's full response text
         contexts=[],              # Tier 1: no retrieval — empty list
                                   # Tier 2: this will contain real document chunks
-        model=OPENAI_MODEL,       # record which model answered
+        model=get_active_model(),  # record which model answered
     )

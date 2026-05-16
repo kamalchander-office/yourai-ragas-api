@@ -111,8 +111,13 @@ def build_case(row: dict, idx: int) -> dict:
         OR None if the row is empty/invalid
     """
 
-    # Get the question — strip whitespace
-    question = row.get("question", "").strip()
+    # Get the question — accept common spreadsheet column names
+    question = (
+        row.get("question")
+        or row.get("questions")
+        or row.get("query")
+        or ""
+    ).strip()
 
     # Skip completely empty rows (common in Excel files with blank rows)
     if not question:
@@ -120,78 +125,103 @@ def build_case(row: dict, idx: int) -> dict:
 
     # Get ground_truth — try multiple possible column name spellings
     # ("ground_truth", "groundtruth", "expected" — QA teams use different names)
-    ground_truth = row.get(
-        "ground_truth",
-        row.get("groundtruth",
-        row.get("expected", ""))   # empty string if none of the above exist
-    ).strip()
+    ground_truth = (
+        row.get("ground_truth")
+        or row.get("groundtruth")
+        or row.get("expected")
+        or ""
+    )
+    ground_truth = str(ground_truth).strip() if ground_truth is not None else ""
 
     # Auto-generate an ID if the spreadsheet doesn't have one
     # TC-001, TC-002, etc.
     case_id = row.get("id", f"TC-{idx:03d}").strip() or f"TC-{idx:03d}"
     # :03d = format as 3-digit number with leading zeros (1 → "001")
 
-    # Get case_type — accept "type" as an alternative column name
-    case_type = row.get("case_type", row.get("type", "positive")).strip().lower()
+    # Get case_type — accept "type" / "case type" (Excel headers)
+    case_type = (
+        row.get("case_type")
+        or row.get("case type")
+        or row.get("type")
+        or "positive"
+    ).strip().lower()
     if case_type not in VALID_TYPES:
         case_type = "positive"   # default to positive if unrecognised value
 
     # Get intent — which YourAI mode this question tests
     intent = row.get("intent", "General Chat").strip()
 
-    return {
+    case = {
         "id":           case_id,
         "question":     question,
         "ground_truth": ground_truth,  # may be empty — generate_cases.py will fill it
         "case_type":    case_type,
         "intent":       intent,
+        "intent_id":    intent,       # YourAI API field (client.py sends this)
         "source":       "human",       # these came from a human-written doc
     }
+    conv_id = row.get("conversation_id", "").strip()
+    if conv_id:
+        case["conversation_id"] = conv_id
+    retrieval = row.get("retrieval_mode", "").strip()
+    if retrieval:
+        case["retrieval_mode"] = retrieval
+    return case
 
 
 # ── STEP 3: FILE PARSERS ──────────────────────────────────────────────────────
 # One function per file format. Each returns a list of test case dicts.
 
+def _rows_to_cases(rows: list, *, sheet_name: str) -> list[dict]:
+    """Parse header row + data rows into test case dicts."""
+    if not rows:
+        return []
+
+    headers = [str(h).strip().lower() if h else "" for h in rows[0]]
+    print(f"  Sheet '{sheet_name}' columns: {headers[:8]}{'...' if len(headers) > 8 else ''}")
+
+    cases = []
+    for i, row in enumerate(rows[1:], start=1):
+        raw = {headers[j]: (cell if cell is not None else "") for j, cell in enumerate(row)}
+        case = build_case(normalise(raw), i)
+        if case:
+            cases.append(case)
+    return cases
+
+
 def parse_xlsx(path: Path) -> list[dict]:
     """
     Read an Excel (.xlsx) file and extract test cases.
 
-    How it works:
-      - Opens the first sheet (ws = worksheet)
-      - Reads row 1 as column headers
-      - Reads each subsequent row as a test case
-      - Returns a list of test case dicts
-
-    Requires: openpyxl library (installed via pip/uv)
+    Uses the active sheet first; if no questions are found, scans other sheets
+    (TestCases.xlsx has many QA tabs — only one has Questions / case type / intent).
     """
     import openpyxl
 
-    # Load the workbook (the Excel file) and get the active sheet
-    wb = openpyxl.load_workbook(path)
-    ws = wb.active   # "active" = the sheet that was open when the file was saved
+    wb = openpyxl.load_workbook(path, data_only=True)
 
-    # Read all rows into a Python list
-    # values_only=True means we get the cell values, not the cell objects
-    rows = list(ws.iter_rows(values_only=True))
+    def _extract(ws) -> list[dict]:
+        rows = list(ws.iter_rows(values_only=True))
+        return _rows_to_cases(rows, sheet_name=ws.title)
 
-    if not rows:
-        sys.exit("ERROR: Excel file is empty.")
+    cases = _extract(wb.active)
+    if cases:
+        wb.close()
+        return cases
 
-    # First row = headers. Convert to lowercase strings.
-    # Example: ("Question", "Case Type", "Intent") → ["question", "case type", "intent"]
-    headers = [str(h).strip().lower() if h else "" for h in rows[0]]
-    print(f"  Columns found in Excel: {headers}")
+    print("  No questions on the active sheet — scanning other sheets...")
+    best_name, best_cases = "", []
+    for name in wb.sheetnames:
+        if name == wb.active.title:
+            continue
+        sheet_cases = _extract(wb[name])
+        if len(sheet_cases) > len(best_cases):
+            best_name, best_cases = name, sheet_cases
 
-    cases = []
-    for i, row in enumerate(rows[1:], start=1):  # skip header row (rows[0])
-        # Zip headers with cell values to create a dict
-        # Example: ["question", "case_type"] + ("What is...", "positive") → {"question": "What is...", "case_type": "positive"}
-        raw = {headers[j]: (cell or "") for j, cell in enumerate(row)}
-        case = build_case(normalise(raw), i)
-        if case:   # skip None (empty rows)
-            cases.append(case)
-
-    return cases
+    wb.close()
+    if best_cases:
+        print(f"  Using sheet '{best_name}' ({len(best_cases)} cases).")
+    return best_cases
 
 
 def parse_docx(path: Path) -> list[dict]:

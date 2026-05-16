@@ -38,13 +38,29 @@
 ║                                                                              ║
 ║  HOW TO RUN:                                                                 ║
 ║    python run_eval.py                                                       ║
+║    python run_eval.py --limit 5    # first N cases only (saves judge quota) ║
 ║    (must run client.py first to generate results.json)                      ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
+from __future__ import annotations
+
+import sys
+
+# RAGAs → instructor → pydantic use `str | Path` annotations (Python 3.10+).
+if sys.version_info < (3, 10):
+    try:
+        import eval_type_backport  # noqa: F401
+    except ImportError:
+        sys.exit(
+            "ERROR: Python 3.9 cannot run RAGAs without eval_type_backport.\n"
+            "Fix:  pip3 install eval_type_backport\n"
+            "Better: use Python 3.11+ (project requires-python >= 3.11)."
+        )
+
 import json       # reads results.json
+import math
 import os         # reads environment variables
-import sys        # exits with error messages
 from collections import defaultdict  # groups rows by case_type and intent
 from datetime import datetime        # formats the report timestamp
 from pathlib import Path             # handles file paths
@@ -59,17 +75,53 @@ from dotenv import load_dotenv   # reads .env file
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-if not OPENAI_API_KEY or OPENAI_API_KEY.startswith("sk-replace"):
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).parent.parent))
+from llm import config as llm_config
+from llm.env_validate import is_gemini_placeholder, is_openai_placeholder, is_openrouter_placeholder
+
+JUDGE_PROVIDER = llm_config.JUDGE_PROVIDER
+
+if JUDGE_PROVIDER == "gemini":
+    if is_gemini_placeholder(llm_config.GEMINI_API_KEY):
+        sys.exit(
+            "ERROR: GEMINI_API_KEY is missing or still a placeholder in .env.\n"
+            "Set LLM_PROVIDER=gemini (or JUDGE_PROVIDER=gemini) and paste your Gemini key."
+        )
+elif JUDGE_PROVIDER == "openrouter":
+    if is_openrouter_placeholder(llm_config.OPENROUTER_API_KEY):
+        sys.exit(
+            "ERROR: OPENROUTER_API_KEY is missing or still a placeholder in .env.\n"
+            "Set JUDGE_PROVIDER=openrouter (or LLM_PROVIDER=openrouter) and add your OpenRouter key."
+        )
+elif is_openai_placeholder(llm_config.OPENAI_API_KEY):
     sys.exit(
-        "ERROR: OPENAI_API_KEY is not set in .env.\n"
-        "RAGAs uses OpenAI as the judge LLM — it needs a real key to work."
+        "ERROR: OPENAI_API_KEY is missing or still a placeholder in .env.\n"
+        "Add an OpenAI key or set JUDGE_PROVIDER=gemini / openrouter."
     )
 
 # The score a metric must reach to be considered passing.
 # 0.70 = 70% quality threshold — standard starting point for LLM evaluation.
 # Raise this to 0.80 as the product matures.
 PASS_THRESHOLD = 0.70
+
+import argparse
+
+_eval_parser = argparse.ArgumentParser(description="Score results with RAGAs.")
+_eval_parser.add_argument(
+    "--report-only",
+    action="store_true",
+    help="Rebuild report.html from existing scores.csv (skip RAGAs API calls)",
+)
+_eval_parser.add_argument(
+    "--limit",
+    type=int,
+    default=None,
+    metavar="N",
+    help="Score only the first N rows from results.json (saves judge API quota). "
+    "Overrides RUN_EVAL_MAX_CASES from .env when set.",
+)
+_eval_args = _eval_parser.parse_args()
 
 
 # ── STEP 2: FILE PATHS ────────────────────────────────────────────────────────
@@ -91,7 +143,22 @@ if not RESULTS_FILE.exists():
 
 # json.loads reads the file and converts JSON text → Python list of dicts
 raw = json.loads(RESULTS_FILE.read_text())
+
+_limit = _eval_args.limit
+if _limit is None:
+    _env_lim = os.getenv("RUN_EVAL_MAX_CASES", "").strip()
+    if _env_lim.isdigit():
+        _limit = int(_env_lim)
+if _limit is not None and _limit > 0:
+    if _limit < len(raw):
+        print(
+            f"Limiting evaluation to first {_limit} of {len(raw)} results "
+            f"(--limit or RUN_EVAL_MAX_CASES).\n"
+        )
+    raw = raw[:_limit]
+
 print(f"Loaded {len(raw)} results from {RESULTS_FILE.name}\n")
+
 
 
 # ── STEP 4: BUILD THE RAGAs DATASET ──────────────────────────────────────────
@@ -110,25 +177,35 @@ print(f"Loaded {len(raw)} results from {RESULTS_FILE.name}\n")
 # The list comprehensions [r["question"] for r in raw] extract each field
 # from every row in raw (the results.json data).
 
-from datasets import Dataset          # HuggingFace datasets library
-from ragas import evaluate            # the main RAGAs scoring function
-from ragas.metrics import (           # the specific metrics we're running
-    answer_correctness,   # Tier 1: how accurate vs ground truth
-    answer_relevancy,     # Tier 1: how on-topic vs the question
-    answer_similarity,    # Tier 1: semantic closeness to ground truth
-    # faithfulness,       # Tier 2: grounded in retrieved documents (needs contexts)
-    # context_precision,  # Tier 2: retrieved docs were relevant (needs contexts)
-    # context_recall,     # Tier 2: all needed docs were retrieved (needs contexts)
-)
+if not _eval_args.report_only:
+    # RAGAs / instructor still read OPENAI_API_KEY for some metric code paths even when
+    # we pass a custom llm. Point them at OpenRouter so a placeholder OPENAI_API_KEY
+    # in .env does not cause 401s on platform.openai.com.
+    if JUDGE_PROVIDER == "openrouter":
+        _or_base = llm_config.OPENROUTER_BASE_URL.rstrip("/")
+        os.environ["OPENAI_API_KEY"] = llm_config.OPENROUTER_API_KEY
+        os.environ["OPENAI_BASE_URL"] = _or_base
+        os.environ["OPENAI_API_BASE"] = _or_base
 
-dataset = Dataset.from_dict({
-    "question":     [r["question"]     for r in raw],
-    "answer":       [r["answer"]       for r in raw],
-    "contexts":     [r["contexts"]     for r in raw],   # list of lists — [] in Tier 1
-    "ground_truth": [r["ground_truth"] for r in raw],
-})
+    from datasets import Dataset          # HuggingFace datasets library
+    from ragas import evaluate            # the main RAGAs scoring function
+    from ragas.metrics import (           # the specific metrics we're running
+        answer_correctness,   # Tier 1: how accurate vs ground truth
+        answer_relevancy,     # Tier 1: how on-topic vs the question
+        answer_similarity,    # Tier 1: semantic closeness to ground truth
+        # faithfulness,       # Tier 2: grounded in retrieved documents (needs contexts)
+        # context_precision,  # Tier 2: retrieved docs were relevant (needs contexts)
+        # context_recall,     # Tier 2: all needed docs were retrieved (needs contexts)
+    )
 
-print(f"Dataset: {len(dataset)} rows, columns: {dataset.column_names}\n")
+    dataset = Dataset.from_dict({
+        "question":     [r["question"]     for r in raw],
+        "answer":       [r["answer"]       for r in raw],
+        "contexts":     [r["contexts"]     for r in raw],   # list of lists — [] in Tier 1
+        "ground_truth": [r["ground_truth"] for r in raw],
+    })
+
+    print(f"Dataset: {len(dataset)} rows, columns: {dataset.column_names}\n")
 
 
 # ── STEP 5: RUN RAGAs ────────────────────────────────────────────────────────
@@ -142,29 +219,120 @@ print(f"Dataset: {len(dataset)} rows, columns: {dataset.column_names}\n")
 # The result is a dictionary-like object. We convert it to a pandas DataFrame
 # (a table structure) for easy manipulation and CSV export.
 
-print("Running RAGAs evaluation (calling OpenAI as judge LLM)...")
-print("This takes 2-5 minutes depending on number of test cases.")
-print("─" * 60)
+if not _eval_args.report_only:
+    if JUDGE_PROVIDER == "gemini":
+        judge_label = f"Gemini ({llm_config.GEMINI_MODEL})"
+    elif JUDGE_PROVIDER == "openrouter":
+        judge_label = f"OpenRouter ({llm_config.OPENROUTER_MODEL})"
+    else:
+        judge_label = f"OpenAI ({os.getenv('OPENAI_MODEL', 'gpt-4o-mini')})"
+    print(f"Running RAGAs evaluation (judge LLM: {judge_label})...")
+    if JUDGE_PROVIDER == "openrouter":
+        print(
+            f"  (OpenRouter key + model {llm_config.OPENROUTER_MODEL}; "
+            f"embeddings: {llm_config.OPENROUTER_EMBEDDING_MODEL})"
+        )
+    print("This takes 2-5 minutes depending on number of test cases.")
+    print("─" * 60)
 
-result = evaluate(
-    dataset,
-    metrics=[
-        answer_relevancy,    # Is the answer on-topic?
-        answer_correctness,  # Is the answer accurate vs ground truth?
-        answer_similarity,   # Semantic closeness to ground truth
-    ],
-)
+    eval_kwargs: dict = {
+        "dataset": dataset,
+        "metrics": [
+            answer_relevancy,
+            answer_correctness,
+            answer_similarity,
+        ],
+    }
 
-# to_pandas() converts RAGAs result → pandas DataFrame (a table)
-# Each row = one test case. Columns = question, answer, each metric score
-df = result.to_pandas()
+    if JUDGE_PROVIDER == "gemini":
+        try:
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            from ragas.llms import LangchainLLMWrapper
+        except ImportError:
+            sys.exit(
+                "ERROR: langchain-google-genai is required for JUDGE_PROVIDER=gemini.\n"
+                "Run: uv sync   or   pip install langchain-google-genai"
+            )
+        judge_llm = ChatGoogleGenerativeAI(
+            model=llm_config.GEMINI_MODEL,
+            google_api_key=llm_config.GEMINI_API_KEY,
+            temperature=0.2,
+        )
+        eval_kwargs["llm"] = LangchainLLMWrapper(judge_llm)
+        try:
+            from google import genai as google_genai
+            from ragas.embeddings import GoogleEmbeddings
 
-# Add our metadata columns back (RAGAs doesn't carry these through)
-# We look them up from raw (results.json) by position — same order guaranteed
-df["id"]        = [r["id"]                           for r in raw]
-df["case_type"] = [r.get("case_type", "positive")    for r in raw]
-df["intent"]    = [r.get("intent",    "General Chat") for r in raw]
-df["source"]    = [r.get("source",    "human")        for r in raw]
+            eval_kwargs["embeddings"] = GoogleEmbeddings(
+                client=google_genai.Client(api_key=llm_config.GEMINI_API_KEY),
+                model="gemini-embedding-001",
+            )
+        except ImportError:
+            pass  # optional google-genai; without it RAGAs may use default OpenAI embeddings
+
+    elif JUDGE_PROVIDER == "openrouter":
+        try:
+            from langchain_openai import ChatOpenAI
+            from ragas.llms import LangchainLLMWrapper
+        except ImportError:
+            sys.exit(
+                "ERROR: langchain-openai is required for JUDGE_PROVIDER=openrouter.\n"
+                "Run: uv sync   or   pip install langchain-openai"
+            )
+        judge_llm = ChatOpenAI(
+            model=llm_config.OPENROUTER_MODEL,
+            openai_api_key=llm_config.OPENROUTER_API_KEY,
+            openai_api_base=llm_config.OPENROUTER_BASE_URL.rstrip("/"),
+            temperature=0.2,
+        )
+        eval_kwargs["llm"] = LangchainLLMWrapper(judge_llm)
+        # RAGAs defaults embeddings to OpenAI (reads OPENAI_API_KEY). Route embeddings
+        # through OpenRouter using LangChain (same key/base as the judge chat model).
+        try:
+            from langchain_openai import OpenAIEmbeddings as LCOpenAIEmbeddings
+            from ragas.embeddings import LangchainEmbeddingsWrapper
+        except ImportError:
+            sys.exit(
+                "ERROR: langchain-openai is required for OpenRouter embeddings in RAGAs.\n"
+                "Run: pip install langchain-openai"
+            )
+        _or_base = llm_config.OPENROUTER_BASE_URL.rstrip("/")
+        _lc_emb = LCOpenAIEmbeddings(
+            model=llm_config.OPENROUTER_EMBEDDING_MODEL,
+            openai_api_key=llm_config.OPENROUTER_API_KEY,
+            openai_api_base=_or_base,
+        )
+        eval_kwargs["embeddings"] = LangchainEmbeddingsWrapper(_lc_emb)
+
+    result = evaluate(**eval_kwargs)
+
+    # to_pandas() converts RAGAs result → pandas DataFrame (a table)
+    df = result.to_pandas()
+    if "question" not in df.columns and "user_input" in df.columns:
+        df["question"] = df["user_input"]
+    if "answer" not in df.columns and "response" in df.columns:
+        df["answer"] = df["response"]
+
+    # Add our metadata columns back (RAGAs doesn't carry these through)
+    df["id"]        = [r["id"]                           for r in raw]
+    df["case_type"] = [r.get("case_type", "positive")    for r in raw]
+    df["intent"]    = [r.get("intent",    "General Chat") for r in raw]
+    df["source"]    = [r.get("source",    "human")        for r in raw]
+else:
+    import pandas as pd
+
+    if not SCORES_CSV.exists():
+        sys.exit(
+            f"ERROR: {SCORES_CSV} not found.\n"
+            "Run  python run_eval.py  without --report-only first."
+        )
+    df = pd.read_csv(SCORES_CSV)
+    # RAGAs exports user_input/response; align names used in the HTML report
+    if "question" not in df.columns and "user_input" in df.columns:
+        df["question"] = df["user_input"]
+    if "answer" not in df.columns and "response" in df.columns:
+        df["answer"] = df["response"]
+    print(f"Loaded {len(df)} rows from {SCORES_CSV.name} (--report-only, skipping RAGAs)\n")
 
 
 # ── STEP 6: SAVE CSV ──────────────────────────────────────────────────────────
@@ -173,12 +341,42 @@ df["source"]    = [r.get("source",    "human")        for r in raw]
 # index=False means don't add an extra row-number column.
 # The QA team can open this in Excel or Google Sheets.
 
-df.to_csv(SCORES_CSV, index=False)
+if not _eval_args.report_only:
+    df.to_csv(SCORES_CSV, index=False)
 
 # ── STEP 7: PRINT SCORES TO TERMINAL ─────────────────────────────────────────
 #
 # Print a human-readable summary immediately so the QA team gets quick feedback
 # without needing to open the HTML report.
+
+def _is_finite_score(val) -> bool:
+    if val is None:
+        return False
+    try:
+        return math.isfinite(float(val))
+    except (TypeError, ValueError):
+        return False
+
+
+def _column_mean(series) -> float | None:
+    """Mean ignoring NaN; None if no valid scores (e.g. judge rate-limited)."""
+    clean = series.dropna()
+    if clean.empty:
+        return None
+    mean = float(clean.mean())
+    return mean if math.isfinite(mean) else None
+
+
+def _rows_metric_mean(rows: list, col: str) -> float | None:
+    values = [
+        float(r[col])
+        for r in rows
+        if col in r and _is_finite_score(r[col])
+    ]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
 
 # Human-readable labels for each metric column name
 METRIC_LABELS = {
@@ -198,13 +396,16 @@ for key, label in METRIC_LABELS.items():
     if key not in df.columns:
         continue   # skip if this metric wasn't computed (shouldn't happen normally)
 
-    val = df[key].mean()   # mean() = average of all values in this column
+    val = _column_mean(df[key])
     agg_scores[key] = val
 
-    status = "✓ PASS" if val >= PASS_THRESHOLD else "✗ FAIL"
+    if val is None:
+        print(f"  {label}")
+        print(f"  {'(no valid scores — judge errors or rate limits)':<20}  N/A")
+        print()
+        continue
 
-    # Visual bar: each █ block = 5% (20 blocks = 100%)
-    # int(val * 20) = number of filled blocks
+    status = "✓ PASS" if val >= PASS_THRESHOLD else "✗ FAIL"
     bar = "█" * int(val * 20)
 
     print(f"  {label}")
@@ -214,7 +415,14 @@ for key, label in METRIC_LABELS.items():
     print()
 
 # Overall pass = ALL metrics must pass (not just some)
-overall_pass = all(v >= PASS_THRESHOLD for v in agg_scores.values())
+scored = [v for v in agg_scores.values() if _is_finite_score(v)]
+overall_pass = bool(scored) and all(v >= PASS_THRESHOLD for v in scored)
+if not scored:
+    print("  ⚠ No valid metric scores — Gemini/OpenAI rate limit or API errors.")
+    print(
+        "    Check judge API keys, OpenRouter/OpenAI embedding routing in run_eval.py, "
+        "or rate limits; then re-run.\n"
+    )
 print("=" * 60)
 print(f"OVERALL: {'✓ PASS' if overall_pass else '✗ FAIL'}")
 print("=" * 60)
@@ -244,7 +452,7 @@ def score_color(val):
       danger  = red    (score < 0.70 = failing)
       secondary = grey (no score / N/A)
     """
-    if val is None or str(val) == "nan":
+    if not _is_finite_score(val):
         return "secondary"   # grey — no data
     if val >= 0.85:
         return "success"     # green — excellent
@@ -258,10 +466,10 @@ def score_badge(val):
     Return an HTML badge showing the score with colour coding.
     Example output: <span class='badge bg-success'>0.847</span>
     """
-    if val is None:
+    if not _is_finite_score(val):
         return "<span class='badge bg-secondary'>N/A</span>"
     color = score_color(val)
-    return f"<span class='badge bg-{color}'>{val:.3f}</span>"
+    return f"<span class='badge bg-{color}'>{float(val):.3f}</span>"
     # :.3f = 3 decimal places (0.847, not 0.8473214...)
 
 
@@ -287,11 +495,12 @@ for ctype in ["positive", "negative", "edge", "adversarial"]:
     rows = type_groups.get(ctype, [])
     if not rows:
         continue
-    avg = lambda col: sum(r[col] for r in rows if col in r and str(r[col]) != "nan") / max(len(rows), 1)
-    rel  = avg("answer_relevancy")
-    cor  = avg("answer_correctness")
-    sim  = avg("answer_similarity")
-    type_pass = all(v >= PASS_THRESHOLD for v in [rel, cor, sim])
+    rel = _rows_metric_mean(rows, "answer_relevancy")
+    cor = _rows_metric_mean(rows, "answer_correctness")
+    sim = _rows_metric_mean(rows, "answer_similarity")
+    type_pass = all(
+        _is_finite_score(v) and v >= PASS_THRESHOLD for v in [rel, cor, sim]
+    )
     type_summary_rows += f"""
       <tr>
         <td><span class="badge bg-{'info' if ctype=='positive' else 'warning' if ctype=='edge' else 'danger' if ctype in ['negative','adversarial'] else 'secondary'} text-dark">{ctype}</span></td>
@@ -309,8 +518,7 @@ for _, row in df.iterrows():
     cor = row.get("answer_correctness")
     sim = row.get("answer_similarity")
     row_pass = all(
-        (v >= PASS_THRESHOLD) for v in [rel, cor, sim]
-        if v is not None and str(v) != "nan"
+        _is_finite_score(v) and v >= PASS_THRESHOLD for v in [rel, cor, sim]
     )
     ctype  = row.get("case_type", "positive")
     intent = row.get("intent", "General Chat")
@@ -331,28 +539,32 @@ for _, row in df.iterrows():
 
 # Recommendations
 recs = []
-if agg_scores.get("answer_relevancy", 1) < PASS_THRESHOLD:
+if _is_finite_score(agg_scores.get("answer_relevancy")) and agg_scores["answer_relevancy"] < PASS_THRESHOLD:
     recs.append(("danger", "Low Answer Relevancy",
         "The AI is going off-topic. Review the system prompt in .env — "
         "it may be too vague. Add explicit scope constraints ('only answer US legal questions')."))
-if agg_scores.get("answer_correctness", 1) < PASS_THRESHOLD:
+if _is_finite_score(agg_scores.get("answer_correctness")) and agg_scores["answer_correctness"] < PASS_THRESHOLD:
     recs.append(("danger", "Low Answer Correctness",
         "The AI is giving inaccurate answers. Consider: upgrading to GPT-4o, "
         "adding a Tier 2 retrieval layer with authoritative legal documents, "
         "or expanding the system prompt with more domain context."))
-if agg_scores.get("answer_similarity", 1) < PASS_THRESHOLD:
+if _is_finite_score(agg_scores.get("answer_similarity")) and agg_scores["answer_similarity"] < PASS_THRESHOLD:
     recs.append(("warning", "Low Answer Similarity",
         "The AI's phrasing is far from the expected answers. This can mean the model "
         "uses very different terminology. Review whether your ground_truth entries "
         "are written in plain language vs. legal jargon — they should match the expected output style."))
 neg_rows = type_groups.get("negative", []) + type_groups.get("adversarial", [])
 if neg_rows:
-    neg_rel = sum(r.get("answer_relevancy", 0) for r in neg_rows) / len(neg_rows)
-    if neg_rel > 0.7:
+    neg_rel = _rows_metric_mean(neg_rows, "answer_relevancy")
+    if _is_finite_score(neg_rel) and neg_rel > 0.7:
         recs.append(("warning", "AI may not be refusing harmful requests",
             "Negative/adversarial cases scored HIGH on relevancy — this could mean "
             "the AI is engaging with requests it should refuse. Review the per-question "
             "answers for negative cases manually."))
+if not scored:
+    recs.insert(0, ("danger", "Scoring incomplete",
+        "RAGAs could not compute metrics (often Gemini free-tier daily limit: 20 requests/model). "
+        "Re-run <code>python run_eval.py</code> after quota resets, or use OpenAI as judge."))
 if not recs:
     recs.append(("success", "All metrics passing",
         "All three Tier-1 metrics are above the 0.70 threshold. "
@@ -366,11 +578,12 @@ for intent in INTENT_ORDER:
     rows = intent_groups.get(intent, [])
     if not rows:
         continue
-    avg = lambda col: sum(r[col] for r in rows if col in r and str(r[col]) != "nan") / max(len(rows),1)
-    rel  = avg("answer_relevancy")
-    cor  = avg("answer_correctness")
-    sim  = avg("answer_similarity")
-    ipass = all(v >= PASS_THRESHOLD for v in [rel, cor, sim])
+    rel = _rows_metric_mean(rows, "answer_relevancy")
+    cor = _rows_metric_mean(rows, "answer_correctness")
+    sim = _rows_metric_mean(rows, "answer_similarity")
+    ipass = all(
+        _is_finite_score(v) and v >= PASS_THRESHOLD for v in [rel, cor, sim]
+    )
     intent_summary_rows += f"""
       <tr>
         <td><strong>{intent}</strong></td>
@@ -430,7 +643,7 @@ html = f"""<!DOCTYPE html>
   <div class="header-bar">
     <div class="container">
       <h1 class="mb-1">YourAI — RAGAs Evaluation Report</h1>
-      <p class="mb-0 text-light">Generated: {now} &nbsp;·&nbsp; Model: {os.getenv('OPENAI_MODEL','gpt-4o-mini')} &nbsp;·&nbsp; Test cases: {len(raw)}</p>
+      <p class="mb-0 text-light">Generated: {now} &nbsp;·&nbsp; Judge: {JUDGE_PROVIDER} / {(llm_config.GEMINI_MODEL if JUDGE_PROVIDER == 'gemini' else llm_config.OPENROUTER_MODEL if JUDGE_PROVIDER == 'openrouter' else os.getenv('OPENAI_MODEL','gpt-4o-mini'))} &nbsp;·&nbsp; Test cases: {len(raw)}</p>
     </div>
   </div>
 
@@ -500,7 +713,10 @@ html = f"""<!DOCTYPE html>
 
 REPORT_HTML.write_text(html)
 
-print(f"\n✓ CSV saved   → {SCORES_CSV}")
+if not _eval_args.report_only:
+    print(f"\n✓ CSV saved   → {SCORES_CSV}")
+else:
+    print()
 print(f"✓ HTML report → {REPORT_HTML}")
 print(f"\n  Open report.html in any browser for the full formatted report.")
 print(f"  Share scores.csv with the team in Excel / Google Sheets.")

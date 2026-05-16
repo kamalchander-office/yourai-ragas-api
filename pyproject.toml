@@ -7,6 +7,9 @@ requires-python = ">=3.11"
 dependencies = [
     "datasets>=4.8.5",
     "fastapi>=0.136.1",
+    "google-genai>=1.0.0",
+    "langchain-google-genai>=2.0.0",
+    "langchain-openai>=0.2.0",
     "markdown>=3.10.2",
     "openai>=2.36.0",
     "openpyxl>=3.1.5",

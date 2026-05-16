@@ -32,13 +32,10 @@
 
 import argparse        # handles command-line flags (--types, --count)
 import json            # reads/writes JSON files
-import os              # reads environment variables
 import sys             # exits with error messages
 from pathlib import Path  # handles file paths
 
 from dotenv import load_dotenv   # reads .env file
-from openai import OpenAI        # OpenAI SDK for calling GPT
-
 
 # ── STEP 1: LOAD SECRETS AND SETUP ───────────────────────────────────────────
 #
@@ -46,22 +43,39 @@ from openai import OpenAI        # OpenAI SDK for calling GPT
 # Path(__file__).parent = the qa/ folder
 # .parent again          = the project root folder
 
-load_dotenv(Path(__file__).parent.parent / ".env")
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-if not OPENAI_API_KEY or OPENAI_API_KEY.startswith("sk-replace"):
+load_dotenv(ROOT / ".env")
+
+from llm import config as llm_config
+from llm.env_validate import (
+    is_gemini_placeholder,
+    is_openai_placeholder,
+    is_openrouter_placeholder,
+)
+from llm.router import chat, chat_json, get_active_model
+
+if llm_config.LLM_PROVIDER == "gemini":
+    if is_gemini_placeholder(llm_config.GEMINI_API_KEY):
+        sys.exit(
+            "ERROR: GEMINI_API_KEY is missing or still a placeholder in .env.\n"
+            "Set LLM_PROVIDER=gemini and add a real Gemini API key."
+        )
+elif llm_config.LLM_PROVIDER == "openrouter":
+    if is_openrouter_placeholder(llm_config.OPENROUTER_API_KEY):
+        sys.exit(
+            "ERROR: OPENROUTER_API_KEY is missing or still a placeholder in .env.\n"
+            "Set LLM_PROVIDER=openrouter and add a real OpenRouter API key."
+        )
+elif is_openai_placeholder(llm_config.OPENAI_API_KEY):
     sys.exit(
-        "ERROR: OPENAI_API_KEY is not set in .env\n"
-        "This script needs a real OpenAI key to generate cases and ground truth."
+        "ERROR: OPENAI_API_KEY is missing or still a placeholder in .env.\n"
+        "Add an OpenAI key or set LLM_PROVIDER=gemini / openrouter."
     )
 
-# We use gpt-4o-mini by default (fast + cheap).
-# The ground-truth generation prompts ask for accuracy, so gpt-4o is preferred
-# if cost is not a concern. Set OPENAI_MODEL=gpt-4o in .env to use the better model.
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
-# Create the OpenAI client (one instance, reused for all calls)
-client = OpenAI(api_key=OPENAI_API_KEY)
+ACTIVE_MODEL = get_active_model()
 
 
 # ── STEP 2: COMMAND-LINE ARGUMENTS ───────────────────────────────────────────
@@ -143,13 +157,7 @@ def fill_ground_truth(cases: list[dict]) -> list[dict]:
             f"\nAnswer:"
         )
 
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,  # low temp = accurate, consistent answers
-        )
-
-        ground_truth = response.choices[0].message.content.strip()
+        ground_truth = chat(prompt, temperature=0.2).strip()
         case["ground_truth"] = ground_truth
         print(f"  ✓ {case['id']}: answer written ({len(ground_truth)} chars)")
 
@@ -325,24 +333,17 @@ def generate_cases(case_type: str, count: int) -> list[dict]:
     # Fill in the template placeholders
     prompt = TYPE_PROMPTS[case_type].format(count=count, existing=sample_questions)
 
-    print(f"  Generating {count} '{case_type}' cases via {OPENAI_MODEL}...")
+    print(f"  Generating {count} '{case_type}' cases via {ACTIVE_MODEL}...")
 
-    response = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[{"role": "user", "content": prompt}],
+    raw_json = chat_json(
+        prompt,
         temperature=0.8,
         # Higher temperature (0.8) = more creative, more diverse output
         # We WANT variety here — different questions, not near-duplicates
-        response_format={"type": "json_object"},
-        # This forces GPT to return valid JSON — prevents malformed responses
-        # that would crash our json.loads() call below
     )
 
-    # Get the raw text response
-    raw = response.choices[0].message.content or "{}"
-
     # Parse JSON — json.loads turns the string into a Python dict
-    parsed = json.loads(raw)
+    parsed = json.loads(raw_json or "{}")
 
     # GPT might return {"cases": [...]} or just [...]  — handle both shapes
     if isinstance(parsed, list):
