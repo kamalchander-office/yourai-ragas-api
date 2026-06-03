@@ -142,7 +142,59 @@ if not RESULTS_FILE.exists():
     )
 
 # json.loads reads the file and converts JSON text → Python list of dicts
-raw = json.loads(RESULTS_FILE.read_text())
+from yourai_chat.parser import parse_chat_response
+
+from qa.align import (
+    align_result_row,
+    align_results,
+    find_alignment_errors,
+    load_test_cases_by_id,
+    load_test_cases_list,
+)
+
+_loaded = json.loads(RESULTS_FILE.read_text())
+_test_cases_list = load_test_cases_list()
+_test_cases_by_id = load_test_cases_by_id()
+
+_drift = find_alignment_errors(_loaded, _test_cases_list)
+if _drift:
+    print("⚠ results.json was out of sync with test_cases.json — fixing file before scoring:")
+    for msg in _drift[:8]:
+        print(f"  • {msg.splitlines()[0]}")
+    if len(_drift) > 8:
+        print(f"  • … and {len(_drift) - 8} more")
+    try:
+        _loaded = align_results(_loaded, _test_cases_list)
+        RESULTS_FILE.write_text(json.dumps(_loaded, indent=2))
+        print(f"  ✓ Updated {RESULTS_FILE.name} from test_cases.json\n")
+    except ValueError as e:
+        sys.exit(f"ERROR: cannot align results — {e}")
+
+
+def _row_for_eval(row: dict, test_case: dict) -> dict:
+    """Score API answer; question/ground_truth always from test_cases.json by id."""
+    out = align_result_row(dict(row), test_case)
+    ans = (out.get("answer") or "").strip()
+    if (not ans or ans.startswith("ERROR:")) and isinstance(out.get("raw_response"), dict):
+        ra = (out["raw_response"].get("answer") or "").strip()
+        if ra:
+            out["answer"] = ra
+    if not out.get("contexts") and isinstance(out.get("raw_response"), dict):
+        norm = parse_chat_response(question=out.get("question", ""), raw=out["raw_response"])
+        if norm.get("contexts"):
+            out["contexts"] = norm["contexts"]
+    return out
+
+
+for r in _loaded:
+    rid = r.get("id")
+    if rid not in _test_cases_by_id:
+        sys.exit(
+            f"ERROR: result id {rid!r} not in test_cases.json — "
+            "re-run ingest_cases.py / client.py."
+        )
+
+raw = [_row_for_eval(r, _test_cases_by_id[r["id"]]) for r in _loaded]
 
 _limit = _eval_args.limit
 if _limit is None:
@@ -157,7 +209,13 @@ if _limit is not None and _limit > 0:
         )
     raw = raw[:_limit]
 
-print(f"Loaded {len(raw)} results from {RESULTS_FILE.name}\n")
+print(f"Loaded {len(raw)} results from {RESULTS_FILE.resolve().name}\n")
+
+if _eval_args.report_only:
+    print(
+        "NOTE: --report-only rebuilds HTML from existing scores.csv only.\n"
+        "      It does NOT re-read results.json. Run without --report-only to re-score.\n"
+    )
 
 
 
@@ -193,9 +251,9 @@ if not _eval_args.report_only:
         answer_correctness,   # Tier 1: how accurate vs ground truth
         answer_relevancy,     # Tier 1: how on-topic vs the question
         answer_similarity,    # Tier 1: semantic closeness to ground truth
-        # faithfulness,       # Tier 2: grounded in retrieved documents (needs contexts)
-        # context_precision,  # Tier 2: retrieved docs were relevant (needs contexts)
-        # context_recall,     # Tier 2: all needed docs were retrieved (needs contexts)
+        faithfulness,         # Tier 2: answer grounded in retrieved contexts
+        # context_precision,  # needs reference_contexts in dataset
+        # context_recall,     # needs reference_contexts in dataset
     )
 
     dataset = Dataset.from_dict({
@@ -235,13 +293,25 @@ if not _eval_args.report_only:
     print("This takes 2-5 minutes depending on number of test cases.")
     print("─" * 60)
 
+    _has_contexts = any(
+        isinstance(r.get("contexts"), list) and len(r["contexts"]) > 0 for r in raw
+    )
+    metrics = [answer_relevancy, answer_correctness, answer_similarity]
+    if _has_contexts:
+        metrics.append(faithfulness)
+        print(
+            f"RAG contexts detected in {sum(1 for r in raw if r.get('contexts'))} "
+            f"row(s) — including faithfulness metric.\n"
+        )
+    else:
+        print(
+            "No non-empty contexts in results — skipping faithfulness "
+            "(re-run client.py after parser update, or check API attribution).\n"
+        )
+
     eval_kwargs: dict = {
         "dataset": dataset,
-        "metrics": [
-            answer_relevancy,
-            answer_correctness,
-            answer_similarity,
-        ],
+        "metrics": metrics,
     }
 
     if JUDGE_PROVIDER == "gemini":
@@ -383,6 +453,7 @@ METRIC_LABELS = {
     "answer_relevancy":   "Answer Relevancy   (on-topic?)",
     "answer_correctness": "Answer Correctness (matches ground truth?)",
     "answer_similarity":  "Answer Similarity  (semantically close?)",
+    "faithfulness":       "Faithfulness       (grounded in retrieved contexts?)",
 }
 
 print("\n✓ Evaluation complete!\n")

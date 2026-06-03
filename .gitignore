@@ -14,3 +14,9 @@ wheels/
 
 # Secrets — never commit these
 .env
+
+# Local QA fixtures (keep README + manifest example in git)
+documents/*
+!documents/README.md
+!documents/manifest.json.example
+!documents/.gitkeep

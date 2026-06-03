@@ -160,6 +160,20 @@ def build_case(row: dict, idx: int) -> dict:
         "intent_id":    intent,       # YourAI API field (client.py sends this)
         "source":       "human",       # these came from a human-written doc
     }
+    doc_file = (
+        row.get("document_file")
+        or row.get("document")
+        or row.get("filename")
+        or ""
+    ).strip()
+    if doc_file:
+        case["document_file"] = Path(doc_file).name
+
+    doc_id = row.get("document_id", row.get("doc_id", "")).strip()
+    if doc_id:
+        case["document_id"] = doc_id
+        case["expected_doc_id"] = doc_id
+
     conv_id = row.get("conversation_id", "").strip()
     if conv_id:
         case["conversation_id"] = conv_id
@@ -358,4 +372,10 @@ else:
 OUT_FILE.write_text(json.dumps(final, indent=2))
 print(f"\n✓ Saved → {OUT_FILE}")
 print(f"  {len(final)} total test cases ready.")
+print(
+    "\nIf qa/results.json already exists, refresh it so questions match these ids:"
+)
+print("  python qa/client.py --align-only    # metadata only")
+print("  python qa/client.py --backend yourai  # new API answers")
+print(f"\nCheck alignment:  python qa/verify_alignment.py")
 print(f"\nNext step: run  python generate_cases.py  to let AI fill in correct answers.")

@@ -41,7 +41,15 @@ def build_result_row(
         "intent_id": test_case.get("intent_id") or test_case.get("intent", ""),
         "retrieval_mode": normalized.get("retrieval_mode"),
         "api_backend": normalized.get("api_backend"),
+        "tier": normalized.get("tier"),
+        "answer_status": normalized.get("answer_status"),
+        "confidence_score": normalized.get("confidence_score"),
+        "grounding_passed": normalized.get("grounding_passed"),
     }
+    if test_case.get("document_id"):
+        row["expected_doc_id"] = test_case.get("expected_doc_id") or test_case.get("document_id")
+    elif test_case.get("expected_doc_id"):
+        row["expected_doc_id"] = test_case["expected_doc_id"]
     if error:
         row["error"] = error
     return row

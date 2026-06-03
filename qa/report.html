@@ -17,7 +17,7 @@
   <div class="header-bar">
     <div class="container">
       <h1 class="mb-1">YourAI — RAGAs Evaluation Report</h1>
-      <p class="mb-0 text-light">Generated: 2026-05-16 11:15 &nbsp;·&nbsp; Judge: openrouter / openai/gpt-4o-mini &nbsp;·&nbsp; Test cases: 5</p>
+      <p class="mb-0 text-light">Generated: 2026-06-03 14:19 &nbsp;·&nbsp; Judge: openrouter / openai/gpt-4o-mini &nbsp;·&nbsp; Test cases: 10</p>
     </div>
   </div>
 
@@ -33,10 +33,10 @@
     <h4 class="section-title">Aggregate Scores</h4>
     <div class="row">
       <div class="col-md-4">
-        <div class="card text-center border-danger mb-3">
-          <div class="card-header bg-danger text-white">FAIL</div>
+        <div class="card text-center border-success mb-3">
+          <div class="card-header bg-success text-white">PASS</div>
           <div class="card-body">
-            <h2 class="card-title">0.448</h2>
+            <h2 class="card-title">0.927</h2>
             <p class="card-text small">Answer Relevancy   (on-topic?)</p>
           </div>
         </div>
@@ -45,8 +45,17 @@
         <div class="card text-center border-danger mb-3">
           <div class="card-header bg-danger text-white">FAIL</div>
           <div class="card-body">
-            <h2 class="card-title">0.446</h2>
+            <h2 class="card-title">0.636</h2>
             <p class="card-text small">Answer Correctness (matches ground truth?)</p>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4">
+        <div class="card text-center border-warning mb-3">
+          <div class="card-header bg-warning text-white">PASS</div>
+          <div class="card-body">
+            <h2 class="card-title">0.789</h2>
+            <p class="card-text small">Answer Similarity  (semantically close?)</p>
           </div>
         </div>
       </div>
@@ -54,8 +63,8 @@
         <div class="card text-center border-danger mb-3">
           <div class="card-header bg-danger text-white">FAIL</div>
           <div class="card-body">
-            <h2 class="card-title">0.567</h2>
-            <p class="card-text small">Answer Similarity  (semantically close?)</p>
+            <h2 class="card-title">0.662</h2>
+            <p class="card-text small">Faithfulness       (grounded in retrieved contexts?)</p>
           </div>
         </div>
       </div></div>
@@ -72,10 +81,10 @@
       <tbody>
       <tr>
         <td><strong>General Chat</strong></td>
-        <td class="text-center">1</td>
-        <td class="text-center"><span class='badge bg-danger'>0.000</span></td>
-        <td class="text-center"><span class='badge bg-danger'>0.027</span></td>
-        <td class="text-center"><span class='badge bg-danger'>0.109</span></td>
+        <td class="text-center">6</td>
+        <td class="text-center"><span class='badge bg-success'>0.960</span></td>
+        <td class="text-center"><span class='badge bg-danger'>0.617</span></td>
+        <td class="text-center"><span class='badge bg-warning'>0.779</span></td>
         <td class="text-center"><span class="badge bg-danger">FAIL</span></td>
       </tr></tbody>
     </table>
@@ -92,18 +101,18 @@
       <tbody>
       <tr>
         <td><span class="badge bg-info text-dark">positive</span></td>
-        <td>4</td>
-        <td><span class='badge bg-danger'>0.313</span></td>
-        <td><span class='badge bg-danger'>0.415</span></td>
-        <td><span class='badge bg-danger'>0.473</span></td>
+        <td>9</td>
+        <td><span class='badge bg-success'>0.920</span></td>
+        <td><span class='badge bg-danger'>0.661</span></td>
+        <td><span class='badge bg-warning'>0.779</span></td>
         <td><span class="badge bg-danger">FAIL</span></td>
       </tr>
       <tr>
         <td><span class="badge bg-warning text-dark">edge</span></td>
         <td>1</td>
         <td><span class='badge bg-success'>0.989</span></td>
-        <td><span class='badge bg-danger'>0.569</span></td>
-        <td><span class='badge bg-success'>0.944</span></td>
+        <td><span class='badge bg-danger'>0.406</span></td>
+        <td><span class='badge bg-success'>0.872</span></td>
         <td><span class="badge bg-danger">FAIL</span></td>
       </tr></tbody>
     </table>
@@ -125,9 +134,9 @@
         <td><small class="text-muted">legal Q&A</small></td>
         <td><span class="badge bg-info">positive</span></td>
         <td><small class="text-muted">human</small></td>
-        <td><span class='badge bg-warning'>0.720</span></td>
-        <td><span class='badge bg-warning'>0.712</span></td>
-        <td><span class='badge bg-warning'>0.850</span></td>
+        <td><span class='badge bg-warning'>0.838</span></td>
+        <td><span class='badge bg-success'>0.969</span></td>
+        <td><span class='badge bg-success'>0.875</span></td>
         <td><span class="badge bg-success">PASS</span></td>
       </tr>
       <tr>
@@ -136,9 +145,9 @@
         <td><small class="text-muted">legal reserach</small></td>
         <td><span class="badge bg-info">positive</span></td>
         <td><small class="text-muted">human</small></td>
-        <td><span class='badge bg-danger'>0.000</span></td>
-        <td><span class='badge bg-danger'>0.161</span></td>
-        <td><span class='badge bg-danger'>0.042</span></td>
+        <td><span class='badge bg-success'>0.904</span></td>
+        <td><span class='badge bg-danger'>0.557</span></td>
+        <td><span class='badge bg-warning'>0.730</span></td>
         <td><span class="badge bg-danger">FAIL</span></td>
       </tr>
       <tr>
@@ -147,10 +156,10 @@
         <td><small class="text-muted">Find document</small></td>
         <td><span class="badge bg-info">positive</span></td>
         <td><small class="text-muted">human</small></td>
-        <td><span class='badge bg-danger'>0.532</span></td>
-        <td><span class='badge bg-warning'>0.758</span></td>
-        <td><span class='badge bg-success'>0.890</span></td>
-        <td><span class="badge bg-danger">FAIL</span></td>
+        <td><span class='badge bg-warning'>0.777</span></td>
+        <td><span class='badge bg-warning'>0.724</span></td>
+        <td><span class='badge bg-warning'>0.736</span></td>
+        <td><span class="badge bg-success">PASS</span></td>
       </tr>
       <tr>
         <td class="text-muted small">TC-004</td>
@@ -159,19 +168,74 @@
         <td><span class="badge bg-warning text-dark">edge</span></td>
         <td><small class="text-muted">human</small></td>
         <td><span class='badge bg-success'>0.989</span></td>
-        <td><span class='badge bg-danger'>0.569</span></td>
-        <td><span class='badge bg-success'>0.944</span></td>
+        <td><span class='badge bg-danger'>0.406</span></td>
+        <td><span class='badge bg-success'>0.872</span></td>
         <td><span class="badge bg-danger">FAIL</span></td>
       </tr>
       <tr>
         <td class="text-muted small">AI-POS-005</td>
-        <td>What is the standard of proof required in a civil lawsuit?</td>
+        <td>What is the significance of the Fifth Amendment in criminal cases?</td>
         <td><small class="text-muted">General Chat</small></td>
         <td><span class="badge bg-info">positive</span></td>
         <td><small class="text-muted">ai-generated</small></td>
-        <td><span class='badge bg-danger'>0.000</span></td>
-        <td><span class='badge bg-danger'>0.027</span></td>
-        <td><span class='badge bg-danger'>0.109</span></td>
+        <td><span class='badge bg-success'>1.000</span></td>
+        <td><span class='badge bg-success'>0.863</span></td>
+        <td><span class='badge bg-success'>0.881</span></td>
+        <td><span class="badge bg-success">PASS</span></td>
+      </tr>
+      <tr>
+        <td class="text-muted small">AI-POS-006</td>
+        <td>How does the Sixth Amendment guarantee the right to counsel?</td>
+        <td><small class="text-muted">General Chat</small></td>
+        <td><span class="badge bg-info">positive</span></td>
+        <td><small class="text-muted">ai-generated</small></td>
+        <td><span class='badge bg-success'>0.916</span></td>
+        <td><span class='badge bg-danger'>0.494</span></td>
+        <td><span class='badge bg-warning'>0.777</span></td>
+        <td><span class="badge bg-danger">FAIL</span></td>
+      </tr>
+      <tr>
+        <td class="text-muted small">AI-POS-007</td>
+        <td>What is the process of filing a civil lawsuit in the U.S.?</td>
+        <td><small class="text-muted">General Chat</small></td>
+        <td><span class="badge bg-info">positive</span></td>
+        <td><small class="text-muted">ai-generated</small></td>
+        <td><span class='badge bg-success'>0.927</span></td>
+        <td><span class='badge bg-success'>0.855</span></td>
+        <td><span class='badge bg-warning'>0.795</span></td>
+        <td><span class="badge bg-success">PASS</span></td>
+      </tr>
+      <tr>
+        <td class="text-muted small">AI-POS-008</td>
+        <td>What are the elements of a valid contract under U.S. law?</td>
+        <td><small class="text-muted">General Chat</small></td>
+        <td><span class="badge bg-info">positive</span></td>
+        <td><small class="text-muted">ai-generated</small></td>
+        <td><span class='badge bg-success'>0.967</span></td>
+        <td><span class='badge bg-danger'>0.178</span></td>
+        <td><span class='badge bg-warning'>0.711</span></td>
+        <td><span class="badge bg-danger">FAIL</span></td>
+      </tr>
+      <tr>
+        <td class="text-muted small">AI-POS-009</td>
+        <td>What are the grounds for filing a motion for summary judgment?</td>
+        <td><small class="text-muted">General Chat</small></td>
+        <td><span class="badge bg-info">positive</span></td>
+        <td><small class="text-muted">ai-generated</small></td>
+        <td><span class='badge bg-success'>1.000</span></td>
+        <td><span class='badge bg-danger'>0.494</span></td>
+        <td><span class='badge bg-success'>0.851</span></td>
+        <td><span class="badge bg-danger">FAIL</span></td>
+      </tr>
+      <tr>
+        <td class="text-muted small">AI-POS-010</td>
+        <td>Explain the concept of negligence in tort law.</td>
+        <td><small class="text-muted">General Chat</small></td>
+        <td><span class="badge bg-info">positive</span></td>
+        <td><small class="text-muted">ai-generated</small></td>
+        <td><span class='badge bg-success'>0.948</span></td>
+        <td><span class='badge bg-warning'>0.817</span></td>
+        <td><span class='badge bg-danger'>0.659</span></td>
         <td><span class="badge bg-danger">FAIL</span></td>
       </tr></tbody>
       </table>
@@ -181,13 +245,7 @@
     <h4 class="section-title">Recommendations</h4>
     
       <div class="alert alert-danger mb-3">
-        <strong>Low Answer Relevancy</strong><br>The AI is going off-topic. Review the system prompt in .env — it may be too vague. Add explicit scope constraints ('only answer US legal questions').
-      </div>
-      <div class="alert alert-danger mb-3">
         <strong>Low Answer Correctness</strong><br>The AI is giving inaccurate answers. Consider: upgrading to GPT-4o, adding a Tier 2 retrieval layer with authoritative legal documents, or expanding the system prompt with more domain context.
-      </div>
-      <div class="alert alert-warning mb-3">
-        <strong>Low Answer Similarity</strong><br>The AI's phrasing is far from the expected answers. This can mean the model uses very different terminology. Review whether your ground_truth entries are written in plain language vs. legal jargon — they should match the expected output style.
       </div>
 
     <hr class="my-4">

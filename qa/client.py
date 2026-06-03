@@ -30,6 +30,7 @@ if str(ROOT) not in sys.path:
 
 load_dotenv(ROOT / ".env")
 
+from qa.align import align_results, find_alignment_errors
 from qa.collectors.mock_collector import collect_with_mock_api
 from qa.collectors.yourai_collector import collect_with_yourai_api
 from validators.rule_validator import RuleValidator
@@ -62,6 +63,11 @@ parser.add_argument(
     action="store_true",
     help="Skip rule/retrieval validator pass (collect only)",
 )
+parser.add_argument(
+    "--align-only",
+    action="store_true",
+    help="Fix results.json metadata from test_cases.json without calling the API",
+)
 args = parser.parse_args()
 
 
@@ -69,7 +75,11 @@ def _run_validators(test_cases: list[dict], results: list[dict]) -> None:
     rule = RuleValidator()
     retrieval = RetrievalValidator()
     rule_failures = 0
-    for tc, row in zip(test_cases, results):
+    results_by_id = {r["id"]: r for r in results if r.get("id")}
+    for tc in test_cases:
+        row = results_by_id.get(tc.get("id"))
+        if not row:
+            continue
         if row.get("answer", "").startswith("ERROR:"):
             continue
         rr = rule.validate(tc, row)
@@ -87,6 +97,19 @@ def _run_validators(test_cases: list[dict], results: list[dict]) -> None:
 def main() -> None:
     test_cases = json.loads(TEST_CASES_FILE.read_text())
     print(f"Loaded {len(test_cases)} test cases from {TEST_CASES_FILE.name}")
+
+    if args.align_only:
+        if not RESULTS_FILE.exists():
+            sys.exit(f"ERROR: {RESULTS_FILE} not found — run client.py first.")
+        results = json.loads(RESULTS_FILE.read_text())
+        drift = find_alignment_errors(results, test_cases)
+        if drift:
+            print(f"Aligning {len(drift)} issue(s) from test_cases.json …")
+        results = align_results(results, test_cases)
+        RESULTS_FILE.write_text(json.dumps(results, indent=2))
+        print(f"✓ Aligned results saved → {RESULTS_FILE}")
+        return
+
     print(f"Backend: {args.backend}\n")
 
     if args.backend == "yourai":
@@ -104,6 +127,15 @@ def main() -> None:
             api_url=args.api_url,
             bearer_token=bearer,
         )
+
+    drift = find_alignment_errors(results, test_cases)
+    if drift:
+        print("\n⚠ Fixing stale question/ground_truth fields from test_cases.json:")
+        for msg in drift[:5]:
+            print(f"  • {msg.splitlines()[0]}")
+        if len(drift) > 5:
+            print(f"  • … and {len(drift) - 5} more")
+    results = align_results(results, test_cases)
 
     if not args.skip_validation:
         _run_validators(test_cases, results)

@@ -1,0 +1,5 @@
+{
+  "_comment": "Copy to manifest.json. Maps YourAI document_id (from chat API) to a filename in this folder.",
+  "3b0d30b1-7893-4883-ae13-43289cd5eb74": "CaseFile.pdf",
+  "3fa85f64-5717-4562-b3fc-2c963f66a36d": "Miranda-Research.pdf"
+}
