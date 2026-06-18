@@ -1,0 +1,249 @@
+{
+  "$schema": "yourai-pwa-api-flow/v1",
+  "title": "YourAI PWA QA API Flow",
+  "description": "Machine-readable companion to YOURAI_PWA_API_FLOW_SPEC.md for automation and Cursor agent analysis",
+  "version": "1.0.0",
+  "last_updated": "2026-06-03",
+  "environment": {
+    "name": "QA",
+    "base_url": "https://youraillc-pwa-qa.appskeeper.in",
+    "chat_route": "/chat",
+    "api_prefix": "/api/v1"
+  },
+  "auth": {
+    "type": "cookie",
+    "required_cookies": ["ya_access", "ya_refresh"],
+    "optional_cookies": ["__clerk_db_jwt", "__client_uat", "AWSALB", "AWSALBCORS"],
+    "identity_provider": "Clerk",
+    "notes": "Token refresh endpoint not yet documented. Do not commit live cookie values."
+  },
+  "entities": {
+    "userId": {
+      "example": "8d9bcb04-d4ee-46e5-873d-28fc7bbecc01",
+      "source": "JWT sub / auth/me",
+      "used_in": ["upload.uploadedById", "JWT"]
+    },
+    "orgId": {
+      "example": "780fb721-4ebd-4ed4-8ebd-43c39e7184cf",
+      "source": "JWT org / auth/me",
+      "used_in": ["document.organizationId", "JWT"]
+    },
+    "conversationId": {
+      "example": "bf9186ae-e687-4dbd-a48a-b5a09d69696c",
+      "source": "POST /conversations/start → data.conversationId",
+      "used_in": ["scope URL", "messages URL", "chat.conversationId"]
+    },
+    "documentId": {
+      "example_video": "0b03e5f3-07ad-4355-b103-05c1177c1189",
+      "example_curl": "59328094-3fdb-4400-a471-aeb3b1330524",
+      "source": "POST /vault/upload → data.id",
+      "used_in": ["poll-status URL", "scope.document_ids", "scope.attached_document_ids"]
+    },
+    "intentId": {
+      "source": "GET /knowledge-base/intents",
+      "used_in": ["chat.intentId"]
+    },
+    "inferenceId": {
+      "example": "py-5c98e0ce-0c9c-4419-aa8c-4a8494606f9a",
+      "source": "POST /chat → data.inferenceId",
+      "used_in": ["debugging only"]
+    }
+  },
+  "intents": {
+    "GENERAL_CHAT": {
+      "id": "5d280a37-92c9-40b4-a253-767a810a08ea",
+      "keywords_sample": ["hello", "hi", "good morning"]
+    },
+    "DOCUMENT_SUMMARISATION": {
+      "id": "9304b526-9d94-4417-9cb0-66f06df14fa1",
+      "keywords_sample": ["summarise document", "document summary", "executive summary", "brief this contract"],
+      "openingBehaviour": "ASK_CLARIFYING_QUESTION"
+    }
+  },
+  "apis": [
+    {
+      "step": 1,
+      "phase": "bootstrap",
+      "method": "GET",
+      "path": "/api/v1/auth/me",
+      "creates": [],
+      "requires": ["auth_cookies"],
+      "saves": ["userId", "orgId", "role"]
+    },
+    {
+      "step": 2,
+      "phase": "bootstrap",
+      "method": "POST",
+      "path": "/api/v1/conversations/start",
+      "body": { "reuse": true },
+      "creates": ["conversationId"],
+      "requires": ["auth_cookies"],
+      "saves": ["conversationId"]
+    },
+    {
+      "step": 3,
+      "phase": "bootstrap",
+      "method": "GET",
+      "path": "/api/v1/knowledge-base/intents",
+      "creates": [],
+      "requires": ["auth_cookies"],
+      "saves": ["intentId map"]
+    },
+    {
+      "step": 4,
+      "phase": "bootstrap",
+      "method": "GET",
+      "path": "/api/v1/knowledge-packs",
+      "query": { "limit": 100 },
+      "parallel": true
+    },
+    {
+      "step": 5,
+      "phase": "bootstrap",
+      "method": "GET",
+      "path": "/api/v1/vault",
+      "query": { "page": 1, "limit": 100, "tab": "ALL" },
+      "parallel": true
+    },
+    {
+      "step": 6,
+      "phase": "bootstrap",
+      "method": "GET",
+      "path": "/api/v1/conversations",
+      "query": { "limit": 3 },
+      "parallel": true
+    },
+    {
+      "step": 7,
+      "phase": "bootstrap",
+      "method": "GET",
+      "path": "/api/v1/conversations/{conversationId}/messages",
+      "requires": ["conversationId"],
+      "parallel": true
+    },
+    {
+      "step": 8,
+      "phase": "upload",
+      "method": "POST",
+      "path": "/api/v1/vault/upload",
+      "content_type": "multipart/form-data",
+      "form_fields": {
+        "file": { "type": "binary", "required": true },
+        "name": { "type": "string", "required": true },
+        "description": { "type": "string", "required": false },
+        "tags": { "type": "json_string", "required": false, "default": "[]" }
+      },
+      "creates": ["documentId"],
+      "http_status": 201,
+      "saves": ["documentId", "signedUrl"]
+    },
+    {
+      "step": 9,
+      "phase": "upload",
+      "method": "GET",
+      "path": "/api/v1/vault/{documentId}/poll-status",
+      "requires": ["documentId"],
+      "poll_until": {
+        "data.status": "READY",
+        "data.processingStatus": "ready"
+      },
+      "interval_seconds": 2
+    },
+    {
+      "step": 10,
+      "phase": "scope",
+      "method": "POST",
+      "path": "/api/v1/conversations/{conversationId}/scope",
+      "body_template": {
+        "document_ids": ["${documentId}"],
+        "attached_document_ids": ["${documentId}"],
+        "active_vault_document_id": null,
+        "knowledge_pack_ids": []
+      },
+      "requires": ["conversationId", "documentId"],
+      "must_match": {
+        "scope.document_ids[0]": "upload.data.id"
+      }
+    },
+    {
+      "step": 11,
+      "phase": "chat",
+      "method": "POST",
+      "path": "/api/v1/chat",
+      "body_template": {
+        "conversationId": "${conversationId}",
+        "message": "${message}",
+        "intentId": "${intentId}",
+        "retrievalMode": "hybrid"
+      },
+      "requires": ["conversationId", "intentId"],
+      "note": "Document IDs come from scope, NOT from chat body"
+    }
+  ],
+  "document_status_machine": {
+    "initial": { "status": "PROCESSING", "processingStatus": "registered", "ocrStatus": "PENDING" },
+    "ready_gate": { "status": "READY", "processingStatus": "ready" },
+    "ocr_may_remain": "PENDING"
+  },
+  "chat_assertions": {
+    "success_greeting": {
+      "answerStatus": "grounded",
+      "status": "success",
+      "success": true,
+      "retrievalSummary.chunks_retrieved": 0
+    },
+    "failure_wrong_intent_summarization": {
+      "answerStatus": "ungrounded",
+      "status": "ungrounded",
+      "success": false,
+      "unusedSources[0].reason": "no_chunks_above_threshold",
+      "retrievalSummary.scope_locked": true
+    }
+  },
+  "critical_rules": [
+    "documentId in scope MUST equal upload.response.data.id",
+    "conversationId in chat MUST equal start.response.data.conversationId",
+    "For document summarization use intentId DOCUMENT_SUMMARISATION not GENERAL_CHAT",
+    "Wait for poll-status READY before scope and chat",
+    "Document IDs are NOT in POST /chat body"
+  ],
+  "test_scenarios": [
+    {
+      "id": "T1",
+      "name": "Greeting",
+      "intent": "GENERAL_CHAT",
+      "requires_upload": false,
+      "expected": { "answerStatus": "grounded" }
+    },
+    {
+      "id": "T2",
+      "name": "Doc summarization correct",
+      "intent": "DOCUMENT_SUMMARISATION",
+      "requires_upload": true,
+      "requires_scope": true,
+      "expected": { "answerStatus": "grounded", "sourcesUsed_min_length": 1 }
+    },
+    {
+      "id": "T3",
+      "name": "Doc summarization bug repro",
+      "intent": "GENERAL_CHAT",
+      "requires_upload": true,
+      "requires_scope": true,
+      "expected": { "answerStatus": "ungrounded", "unusedSources_reason": "no_chunks_above_threshold" }
+    }
+  ],
+  "related_files": {
+    "markdown_spec": "docs/YOURAI_PWA_API_FLOW_SPEC.md",
+    "eval_contracts": "packages/yourai-eval/src/yourai_eval/contracts/yourai_chat_api.py",
+    "eval_http_provider": "packages/yourai-eval/src/yourai_eval/providers/http.py",
+    "video_frames": "video_analysis_frames/manifest.json"
+  },
+  "gaps_unconfirmed": [
+    "ya_access refresh endpoint",
+    "Clerk to YourAI token exchange endpoint",
+    "conversations/start with reuse false",
+    "client PUT to signedUrl requirement",
+    "chat SSE streaming",
+    "separate message POST API"
+  ]
+}

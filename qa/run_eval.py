@@ -1,10 +1,10 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  run_eval.py — Score every answer with RAGAs and produce the final report   ║
+║  run_eval.py — Score every answer with RAGAs + DeepEval and produce report  ║
 ║                                                                              ║
 ║  WHAT THIS FILE DOES:                                                        ║
 ║  This is the SCORER. It reads results.json (produced by client.py),         ║
-║  sends every question+answer pair to RAGAs, and produces two output files:  ║
+║  sends every question+answer pair to RAGAs + DeepEval, and produces:      ║
 ║                                                                              ║
 ║  OUTPUT FILES:                                                               ║
 ║    scores.csv    → raw numbers, open in Excel or Google Sheets              ║
@@ -18,20 +18,13 @@
 ║    4. Calculates semantic similarity between answer and ground truth (0-1)  ║
 ║  This is called "LLM-as-judge" — using one AI to evaluate another.         ║
 ║                                                                              ║
-║  THE 6 RAGAs METRICS AND WHEN EACH IS ACTIVE:                               ║
+║  RAGAs METRICS (six — scoped to legal RAG chat QA)                          ║
+║  TIER 1 (always): answer_relevancy, answer_correctness, answer_similarity   ║
+║  TIER 2 (when contexts): faithfulness, context_precision, context_recall  ║
 ║                                                                              ║
-║  ── TIER 1 (active now — no document retrieval needed) ──────────────────   ║
-║  answer_relevancy   → Is the answer on-topic? Did it address the question?  ║
-║  answer_correctness → Does it match the ground truth? Is it accurate?       ║
-║  answer_similarity  → Semantic closeness to ground truth (meaning, not words)║
-║                                                                              ║
-║  ── TIER 2 (coming later — needs document retrieval / vector store) ──────  ║
-║  faithfulness       → Is the answer grounded in retrieved documents?        ║
-║                        Catches hallucination — AI making up confident facts ║
-║  context_precision  → Were the retrieved documents actually relevant?       ║
-║                        Catches noise — pulling irrelevant documents          ║
-║  context_recall     → Did we retrieve ALL the documents we needed?          ║
-║                        Catches gaps — missing important source material      ║
+║  DEEPEVAL ADD-ONS (complement RAGAs — not duplicates)                       ║
+║  Always: non_advice (legal safety)                                          ║
+║  When contexts/reference doc: hallucination, contextual_relevancy           ║
 ║                                                                              ║
 ║  PASS THRESHOLD: 0.70 — industry standard starting point.                   ║
 ║  Raise to 0.80+ as YourAI matures and improves.                             ║
@@ -107,7 +100,7 @@ PASS_THRESHOLD = 0.70
 
 import argparse
 
-_eval_parser = argparse.ArgumentParser(description="Score results with RAGAs.")
+_eval_parser = argparse.ArgumentParser(description="Score results with RAGAs + DeepEval.")
 _eval_parser.add_argument(
     "--report-only",
     action="store_true",
@@ -142,14 +135,27 @@ if not RESULTS_FILE.exists():
     )
 
 # json.loads reads the file and converts JSON text → Python list of dicts
-from yourai_chat.parser import parse_chat_response
-
 from qa.align import (
-    align_result_row,
     align_results,
     find_alignment_errors,
     load_test_cases_by_id,
     load_test_cases_list,
+)
+from qa.eval_metrics import (
+    build_ragas_dataset_dict,
+    combine_active_metric_names,
+    is_finite_score,
+    labels_for_columns,
+    merge_deepeval_scores_into_df,
+    metric_names_from_df,
+    metric_passes,
+    metric_short_header,
+    prepare_eval_row,
+    rows_with_contexts,
+    rows_with_hallucination_context,
+    run_deepeval_scores,
+    select_deepeval_metric_names,
+    select_ragas_metrics,
 )
 
 _loaded = json.loads(RESULTS_FILE.read_text())
@@ -171,21 +177,6 @@ if _drift:
         sys.exit(f"ERROR: cannot align results — {e}")
 
 
-def _row_for_eval(row: dict, test_case: dict) -> dict:
-    """Score API answer; question/ground_truth always from test_cases.json by id."""
-    out = align_result_row(dict(row), test_case)
-    ans = (out.get("answer") or "").strip()
-    if (not ans or ans.startswith("ERROR:")) and isinstance(out.get("raw_response"), dict):
-        ra = (out["raw_response"].get("answer") or "").strip()
-        if ra:
-            out["answer"] = ra
-    if not out.get("contexts") and isinstance(out.get("raw_response"), dict):
-        norm = parse_chat_response(question=out.get("question", ""), raw=out["raw_response"])
-        if norm.get("contexts"):
-            out["contexts"] = norm["contexts"]
-    return out
-
-
 for r in _loaded:
     rid = r.get("id")
     if rid not in _test_cases_by_id:
@@ -194,7 +185,13 @@ for r in _loaded:
             "re-run ingest_cases.py / client.py."
         )
 
-raw = [_row_for_eval(r, _test_cases_by_id[r["id"]]) for r in _loaded]
+raw = [prepare_eval_row(r, _test_cases_by_id[r["id"]]) for r in _loaded]
+_ref_rows = sum(1 for r in raw if r.get("reference_contexts"))
+if _ref_rows:
+    print(
+        f"Reference contexts available for {_ref_rows} row(s) "
+        f"(test_cases / local document / session.json).\n"
+    )
 
 _limit = _eval_args.limit
 if _limit is None:
@@ -247,23 +244,14 @@ if not _eval_args.report_only:
 
     from datasets import Dataset          # HuggingFace datasets library
     from ragas import evaluate            # the main RAGAs scoring function
-    from ragas.metrics import (           # the specific metrics we're running
-        answer_correctness,   # Tier 1: how accurate vs ground truth
-        answer_relevancy,     # Tier 1: how on-topic vs the question
-        answer_similarity,    # Tier 1: semantic closeness to ground truth
-        faithfulness,         # Tier 2: answer grounded in retrieved contexts
-        # context_precision,  # needs reference_contexts in dataset
-        # context_recall,     # needs reference_contexts in dataset
-    )
 
-    dataset = Dataset.from_dict({
-        "question":     [r["question"]     for r in raw],
-        "answer":       [r["answer"]       for r in raw],
-        "contexts":     [r["contexts"]     for r in raw],   # list of lists — [] in Tier 1
-        "ground_truth": [r["ground_truth"] for r in raw],
-    })
+    dataset = Dataset.from_dict(build_ragas_dataset_dict(raw))
+    metrics, RAGAS_METRIC_NAMES = select_ragas_metrics(raw)
+    DEEPEVAL_METRIC_NAMES_ACTIVE = select_deepeval_metric_names(raw)
 
-    print(f"Dataset: {len(dataset)} rows, columns: {dataset.column_names}\n")
+    print(f"Dataset: {len(dataset)} rows, columns: {dataset.column_names}")
+    print(f"RAGAs metrics: {', '.join(RAGAS_METRIC_NAMES)}")
+    print(f"DeepEval metrics: {', '.join(DEEPEVAL_METRIC_NAMES_ACTIVE)}\n")
 
 
 # ── STEP 5: RUN RAGAs ────────────────────────────────────────────────────────
@@ -293,21 +281,20 @@ if not _eval_args.report_only:
     print("This takes 2-5 minutes depending on number of test cases.")
     print("─" * 60)
 
-    _has_contexts = any(
-        isinstance(r.get("contexts"), list) and len(r["contexts"]) > 0 for r in raw
-    )
-    metrics = [answer_relevancy, answer_correctness, answer_similarity]
-    if _has_contexts:
-        metrics.append(faithfulness)
+    _ctx_count = rows_with_contexts(raw)
+    if _ctx_count:
         print(
-            f"RAG contexts detected in {sum(1 for r in raw if r.get('contexts'))} "
-            f"row(s) — including faithfulness metric.\n"
+            f"RAG contexts detected in {_ctx_count} row(s) — "
+            f"including {len(RAGAS_METRIC_NAMES) - 3} RAGAs retrieval metric(s).\n"
         )
     else:
         print(
-            "No non-empty contexts in results — skipping faithfulness "
-            "(re-run client.py after parser update, or check API attribution).\n"
+            "No non-empty contexts in results — RAGAs Tier 1 only "
+            "(re-run client.py or check source_attribution in API responses).\n"
         )
+        RAGAS_METRIC_NAMES = [n for n in RAGAS_METRIC_NAMES if n in (
+            "answer_relevancy", "answer_correctness", "answer_similarity"
+        )]
 
     eval_kwargs: dict = {
         "dataset": dataset,
@@ -374,6 +361,30 @@ if not _eval_args.report_only:
         )
         eval_kwargs["embeddings"] = LangchainEmbeddingsWrapper(_lc_emb)
 
+    elif JUDGE_PROVIDER == "openai":
+        try:
+            from langchain_openai import ChatOpenAI
+            from langchain_openai import OpenAIEmbeddings as LCOpenAIEmbeddings
+            from ragas.embeddings import LangchainEmbeddingsWrapper
+            from ragas.llms import LangchainLLMWrapper
+        except ImportError:
+            sys.exit(
+                "ERROR: langchain-openai is required for JUDGE_PROVIDER=openai.\n"
+                "Run: uv sync   or   pip install langchain-openai"
+            )
+        judge_llm = ChatOpenAI(
+            model=llm_config.OPENAI_MODEL,
+            openai_api_key=llm_config.OPENAI_API_KEY,
+            temperature=0.2,
+            max_tokens=int(os.getenv("OPENAI_JUDGE_MAX_TOKENS", "8192")),
+        )
+        eval_kwargs["llm"] = LangchainLLMWrapper(judge_llm)
+        _lc_emb = LCOpenAIEmbeddings(
+            model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
+            openai_api_key=llm_config.OPENAI_API_KEY,
+        )
+        eval_kwargs["embeddings"] = LangchainEmbeddingsWrapper(_lc_emb)
+
     result = evaluate(**eval_kwargs)
 
     # to_pandas() converts RAGAs result → pandas DataFrame (a table)
@@ -383,6 +394,28 @@ if not _eval_args.report_only:
     if "answer" not in df.columns and "response" in df.columns:
         df["answer"] = df["response"]
 
+    # DeepEval add-ons (complement RAGAs; same judge provider)
+    print("Running DeepEval metrics (complement RAGAs)...")
+    print("─" * 60)
+    _hall_ctx = rows_with_hallucination_context(raw)
+    if _hall_ctx:
+        print(f"  Hallucination context available for {_hall_ctx} row(s).")
+    deepeval_score_rows = run_deepeval_scores(
+        raw,
+        judge_provider=JUDGE_PROVIDER,
+        threshold=PASS_THRESHOLD,
+        metric_names=DEEPEVAL_METRIC_NAMES_ACTIVE,
+    )
+    df = merge_deepeval_scores_into_df(
+        df,
+        deepeval_score_rows,
+        active_metric_names=DEEPEVAL_METRIC_NAMES_ACTIVE,
+    )
+    ACTIVE_METRIC_NAMES = combine_active_metric_names(
+        RAGAS_METRIC_NAMES,
+        DEEPEVAL_METRIC_NAMES_ACTIVE,
+    )
+    print(f"DeepEval complete — active metrics: {', '.join(DEEPEVAL_METRIC_NAMES_ACTIVE)}\n")
     # Add our metadata columns back (RAGAs doesn't carry these through)
     df["id"]        = [r["id"]                           for r in raw]
     df["case_type"] = [r.get("case_type", "positive")    for r in raw]
@@ -402,6 +435,7 @@ else:
         df["question"] = df["user_input"]
     if "answer" not in df.columns and "response" in df.columns:
         df["answer"] = df["response"]
+    ACTIVE_METRIC_NAMES = metric_names_from_df(df.columns, df)
     print(f"Loaded {len(df)} rows from {SCORES_CSV.name} (--report-only, skipping RAGAs)\n")
 
 
@@ -420,12 +454,7 @@ if not _eval_args.report_only:
 # without needing to open the HTML report.
 
 def _is_finite_score(val) -> bool:
-    if val is None:
-        return False
-    try:
-        return math.isfinite(float(val))
-    except (TypeError, ValueError):
-        return False
+    return is_finite_score(val)
 
 
 def _column_mean(series) -> float | None:
@@ -448,13 +477,7 @@ def _rows_metric_mean(rows: list, col: str) -> float | None:
     return sum(values) / len(values)
 
 
-# Human-readable labels for each metric column name
-METRIC_LABELS = {
-    "answer_relevancy":   "Answer Relevancy   (on-topic?)",
-    "answer_correctness": "Answer Correctness (matches ground truth?)",
-    "answer_similarity":  "Answer Similarity  (semantically close?)",
-    "faithfulness":       "Faithfulness       (grounded in retrieved contexts?)",
-}
+REPORT_METRIC_LABELS = labels_for_columns(ACTIVE_METRIC_NAMES)
 
 print("\n✓ Evaluation complete!\n")
 print("=" * 60)
@@ -463,9 +486,10 @@ print("=" * 60)
 
 agg_scores = {}   # store the aggregate scores so we can use them in the HTML report later
 
-for key, label in METRIC_LABELS.items():
+for key in ACTIVE_METRIC_NAMES:
     if key not in df.columns:
-        continue   # skip if this metric wasn't computed (shouldn't happen normally)
+        continue
+    label = REPORT_METRIC_LABELS.get(key, key)
 
     val = _column_mean(df[key])
     agg_scores[key] = val
@@ -476,7 +500,7 @@ for key, label in METRIC_LABELS.items():
         print()
         continue
 
-    status = "✓ PASS" if val >= PASS_THRESHOLD else "✗ FAIL"
+    status = "✓ PASS" if metric_passes(key, val, PASS_THRESHOLD) else "✗ FAIL"
     bar = "█" * int(val * 20)
 
     print(f"  {label}")
@@ -487,7 +511,11 @@ for key, label in METRIC_LABELS.items():
 
 # Overall pass = ALL metrics must pass (not just some)
 scored = [v for v in agg_scores.values() if _is_finite_score(v)]
-overall_pass = bool(scored) and all(v >= PASS_THRESHOLD for v in scored)
+overall_pass = bool(scored) and all(
+    metric_passes(key, agg_scores[key], PASS_THRESHOLD)
+    for key in ACTIVE_METRIC_NAMES
+    if key in agg_scores and _is_finite_score(agg_scores[key])
+)
 if not scored:
     print("  ⚠ No valid metric scores — Gemini/OpenAI rate limit or API errors.")
     print(
@@ -514,34 +542,92 @@ print("=" * 60)
 
 # ── Helper functions ──────────────────────────────────────────────────────────
 
-def score_color(val):
+def score_color(val, metric_name: str | None = None):
     """
     Map a score (0-1) to a Bootstrap colour class name.
-    Bootstrap colour classes control the background colour of badges and cards.
-      success = green  (score ≥ 0.85 = excellent)
-      warning = yellow (score ≥ 0.70 = acceptable, passes threshold)
-      danger  = red    (score < 0.70 = failing)
-      secondary = grey (no score / N/A)
+    Hallucination is inverted (lower is better).
     """
     if not _is_finite_score(val):
         return "secondary"   # grey — no data
-    if val >= 0.85:
+    if metric_name and not metric_passes(metric_name, val, PASS_THRESHOLD):
+        return "danger"
+    value = float(val)
+    if metric_name in ("hallucination",):
+        if value <= 0.15:
+            return "success"
+        if value <= PASS_THRESHOLD:
+            return "warning"
+        return "danger"
+    if value >= 0.85:
         return "success"     # green — excellent
-    if val >= PASS_THRESHOLD:
+    if value >= PASS_THRESHOLD:
         return "warning"     # yellow — acceptable
     return "danger"          # red — failing
 
 
-def score_badge(val):
+def score_badge(val, metric_name: str | None = None):
     """
     Return an HTML badge showing the score with colour coding.
     Example output: <span class='badge bg-success'>0.847</span>
     """
     if not _is_finite_score(val):
         return "<span class='badge bg-secondary'>N/A</span>"
-    color = score_color(val)
+    color = score_color(val, metric_name)
     return f"<span class='badge bg-{color}'>{float(val):.3f}</span>"
     # :.3f = 3 decimal places (0.847, not 0.8473214...)
+
+
+def _row_passes_threshold(row, metric_names: list[str]) -> bool:
+    scored_names = [
+        name
+        for name in metric_names
+        if _is_finite_score(row.get(name) if hasattr(row, "get") else row[name])
+    ]
+    if not scored_names:
+        return False
+    return all(
+        metric_passes(
+            name,
+            row.get(name) if hasattr(row, "get") else row[name],
+            PASS_THRESHOLD,
+        )
+        for name in scored_names
+    )
+
+
+def _group_passes_threshold(rows, metric_names: list[str]) -> bool:
+    if not rows or not metric_names:
+        return False
+    scored_keys = []
+    for key in metric_names:
+        mean = _rows_metric_mean(rows, key)
+        if not _is_finite_score(mean):
+            continue
+        scored_keys.append(key)
+        if not metric_passes(key, mean, PASS_THRESHOLD):
+            return False
+    return bool(scored_keys)
+
+
+def _metric_table_headers() -> str:
+    return "".join(
+        f'<th class="text-center">{metric_short_header(name)}</th>'
+        for name in ACTIVE_METRIC_NAMES
+    )
+
+
+def _metric_table_cells(row) -> str:
+    return "".join(
+        f'<td class="text-center">{score_badge(row.get(name), name)}</td>'
+        for name in ACTIVE_METRIC_NAMES
+    )
+
+
+def _metric_table_cells_for_group(rows) -> str:
+    return "".join(
+        f'<td class="text-center">{score_badge(_rows_metric_mean(rows, name), name)}</td>'
+        for name in ACTIVE_METRIC_NAMES
+    )
 
 
 # ── Group rows for breakdown tables ──────────────────────────────────────────
@@ -566,31 +652,19 @@ for ctype in ["positive", "negative", "edge", "adversarial"]:
     rows = type_groups.get(ctype, [])
     if not rows:
         continue
-    rel = _rows_metric_mean(rows, "answer_relevancy")
-    cor = _rows_metric_mean(rows, "answer_correctness")
-    sim = _rows_metric_mean(rows, "answer_similarity")
-    type_pass = all(
-        _is_finite_score(v) and v >= PASS_THRESHOLD for v in [rel, cor, sim]
-    )
+    type_pass = _group_passes_threshold(rows, ACTIVE_METRIC_NAMES)
     type_summary_rows += f"""
       <tr>
         <td><span class="badge bg-{'info' if ctype=='positive' else 'warning' if ctype=='edge' else 'danger' if ctype in ['negative','adversarial'] else 'secondary'} text-dark">{ctype}</span></td>
         <td>{len(rows)}</td>
-        <td>{score_badge(rel)}</td>
-        <td>{score_badge(cor)}</td>
-        <td>{score_badge(sim)}</td>
+        {_metric_table_cells_for_group(rows)}
         <td><span class="badge bg-{'success' if type_pass else 'danger'}">{'PASS' if type_pass else 'FAIL'}</span></td>
       </tr>"""
 
 # Per-question rows
 question_rows = ""
 for _, row in df.iterrows():
-    rel = row.get("answer_relevancy")
-    cor = row.get("answer_correctness")
-    sim = row.get("answer_similarity")
-    row_pass = all(
-        _is_finite_score(v) and v >= PASS_THRESHOLD for v in [rel, cor, sim]
-    )
+    row_pass = _row_passes_threshold(row, ACTIVE_METRIC_NAMES)
     ctype  = row.get("case_type", "positive")
     intent = row.get("intent", "General Chat")
     src    = row.get("source", "human")
@@ -602,9 +676,7 @@ for _, row in df.iterrows():
         <td><small class="text-muted">{intent}</small></td>
         <td><span class="badge bg-{'info' if ctype=='positive' else 'warning text-dark' if ctype=='edge' else 'danger'}">{ctype}</span></td>
         <td><small class="text-muted">{src}</small></td>
-        <td>{score_badge(rel)}</td>
-        <td>{score_badge(cor)}</td>
-        <td>{score_badge(sim)}</td>
+        {_metric_table_cells(row)}
         <td><span class="badge bg-{'success' if row_pass else 'danger'}">{'PASS' if row_pass else 'FAIL'}</span></td>
       </tr>"""
 
@@ -624,6 +696,42 @@ if _is_finite_score(agg_scores.get("answer_similarity")) and agg_scores["answer_
         "The AI's phrasing is far from the expected answers. This can mean the model "
         "uses very different terminology. Review whether your ground_truth entries "
         "are written in plain language vs. legal jargon — they should match the expected output style."))
+if _is_finite_score(agg_scores.get("faithfulness")) and not metric_passes(
+    "faithfulness", agg_scores["faithfulness"], PASS_THRESHOLD
+):
+    recs.append(("danger", "Low Faithfulness",
+        "Answers contain claims not supported by retrieved source_attribution snippets. "
+        "Review hallucination guardrails and retrieval scope locking."))
+if _is_finite_score(agg_scores.get("context_precision")) and not metric_passes(
+    "context_precision", agg_scores["context_precision"], PASS_THRESHOLD
+):
+    recs.append(("warning", "Low Context Precision",
+        "Retrieved chunks are often irrelevant to the question. Tune hybrid retrieval "
+        "or tighten document scope."))
+if _is_finite_score(agg_scores.get("context_recall")) and not metric_passes(
+    "context_recall", agg_scores["context_recall"], PASS_THRESHOLD
+):
+    recs.append(("warning", "Low Context Recall",
+        "Retrieved contexts miss facts needed for the ground-truth answer. "
+        "Check chunking, top-k, or add reference_contexts from the uploaded document."))
+if _is_finite_score(agg_scores.get("non_advice")) and not metric_passes(
+    "non_advice", agg_scores["non_advice"], PASS_THRESHOLD
+):
+    recs.append(("danger", "Low Non-Advice Score",
+        "The AI may be giving specific legal advice instead of deferring to qualified counsel. "
+        "Review system prompt guardrails and refusal patterns for legal questions."))
+if _is_finite_score(agg_scores.get("hallucination")) and not metric_passes(
+    "hallucination", agg_scores["hallucination"], PASS_THRESHOLD
+):
+    recs.append(("danger", "High Hallucination (DeepEval)",
+        "Answers contradict the reference or retrieved context. "
+        "Tighten grounding rules and verify source_attribution coverage."))
+if _is_finite_score(agg_scores.get("contextual_relevancy")) and not metric_passes(
+    "contextual_relevancy", agg_scores["contextual_relevancy"], PASS_THRESHOLD
+):
+    recs.append(("warning", "Low Contextual Relevancy (DeepEval)",
+        "Retrieved chunks contain too much irrelevant material for the question. "
+        "Reduce top-k or improve chunking / hybrid retrieval ranking."))
 neg_rows = type_groups.get("negative", []) + type_groups.get("adversarial", [])
 if neg_rows:
     neg_rel = _rows_metric_mean(neg_rows, "answer_relevancy")
@@ -637,10 +745,13 @@ if not scored:
         "RAGAs could not compute metrics (often Gemini free-tier daily limit: 20 requests/model). "
         "Re-run <code>python run_eval.py</code> after quota resets, or use OpenAI as judge."))
 if not recs:
+    tier_note = (
+        "All active RAGAs + DeepEval metrics are above the 0.70 threshold."
+        if len(ACTIVE_METRIC_NAMES) > 4
+        else "All Tier-1 metrics are above the 0.70 threshold."
+    )
     recs.append(("success", "All metrics passing",
-        "All three Tier-1 metrics are above the 0.70 threshold. "
-        "Consider raising the threshold to 0.80, adding more edge cases, "
-        "or moving to Tier 2 (retrieval) for higher accuracy."))
+        f"{tier_note} Consider raising the threshold to 0.80 or adding more edge cases."))
 
 # Intent summary rows
 INTENT_ORDER = ["General Chat","Legal Q&A","Legal Research","Case Law Analysis","Find Document","Clause Analysis","Clause Comparison"]
@@ -649,19 +760,12 @@ for intent in INTENT_ORDER:
     rows = intent_groups.get(intent, [])
     if not rows:
         continue
-    rel = _rows_metric_mean(rows, "answer_relevancy")
-    cor = _rows_metric_mean(rows, "answer_correctness")
-    sim = _rows_metric_mean(rows, "answer_similarity")
-    ipass = all(
-        _is_finite_score(v) and v >= PASS_THRESHOLD for v in [rel, cor, sim]
-    )
+    ipass = _group_passes_threshold(rows, ACTIVE_METRIC_NAMES)
     intent_summary_rows += f"""
       <tr>
         <td><strong>{intent}</strong></td>
         <td class="text-center">{len(rows)}</td>
-        <td class="text-center">{score_badge(rel)}</td>
-        <td class="text-center">{score_badge(cor)}</td>
-        <td class="text-center">{score_badge(sim)}</td>
+        {_metric_table_cells_for_group(rows)}
         <td class="text-center"><span class="badge bg-{'success' if ipass else 'danger'}">{'PASS' if ipass else 'FAIL'}</span></td>
       </tr>"""
 
@@ -673,15 +777,17 @@ for level, title, body in recs:
       </div>"""
 
 # Aggregate metric cards
+card_col = "col-md-3" if len(ACTIVE_METRIC_NAMES) > 6 else "col-md-4"
 card_html = ""
-for key, label in METRIC_LABELS.items():
+for key in ACTIVE_METRIC_NAMES:
     val = agg_scores.get(key)
     if val is None:
         continue
-    color = score_color(val)
-    status = "PASS" if val >= PASS_THRESHOLD else "FAIL"
+    label = REPORT_METRIC_LABELS.get(key, key)
+    color = score_color(val, key)
+    status = "PASS" if metric_passes(key, val, PASS_THRESHOLD) else "FAIL"
     card_html += f"""
-      <div class="col-md-4">
+      <div class="{card_col}">
         <div class="card text-center border-{color} mb-3">
           <div class="card-header bg-{color} text-white">{status}</div>
           <div class="card-body">
@@ -690,6 +796,22 @@ for key, label in METRIC_LABELS.items():
           </div>
         </div>
       </div>"""
+
+metrics_footer = ", ".join(ACTIVE_METRIC_NAMES)
+_has_ragas_t2 = any(n in ACTIVE_METRIC_NAMES for n in (
+    "faithfulness", "context_precision", "context_recall",
+))
+_has_deepeval_t2 = any(n in ACTIVE_METRIC_NAMES for n in (
+    "hallucination", "contextual_relevancy",
+))
+if _has_ragas_t2 and _has_deepeval_t2:
+    tier_footer = "RAGAs Tier 1+2 + DeepEval retrieval metrics"
+elif _has_ragas_t2:
+    tier_footer = "RAGAs Tier 1+2 + DeepEval safety"
+elif _has_deepeval_t2:
+    tier_footer = "RAGAs Tier 1 + DeepEval retrieval/safety"
+else:
+    tier_footer = "RAGAs Tier 1 + DeepEval safety (no retrieval contexts)"
 
 now = datetime.now().strftime("%Y-%m-%d %H:%M")
 overall_color = "success" if overall_pass else "danger"
@@ -700,7 +822,7 @@ html = f"""<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>YourAI RAGAs Evaluation Report</title>
+  <title>YourAI RAGAs + DeepEval Evaluation Report</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
     body {{ font-family: 'Segoe UI', sans-serif; background: #f8f9fa; }}
@@ -713,7 +835,7 @@ html = f"""<!DOCTYPE html>
 <body>
   <div class="header-bar">
     <div class="container">
-      <h1 class="mb-1">YourAI — RAGAs Evaluation Report</h1>
+      <h1 class="mb-1">YourAI — RAGAs + DeepEval Evaluation Report</h1>
       <p class="mb-0 text-light">Generated: {now} &nbsp;·&nbsp; Judge: {JUDGE_PROVIDER} / {(llm_config.GEMINI_MODEL if JUDGE_PROVIDER == 'gemini' else llm_config.OPENROUTER_MODEL if JUDGE_PROVIDER == 'openrouter' else os.getenv('OPENAI_MODEL','gpt-4o-mini'))} &nbsp;·&nbsp; Test cases: {len(raw)}</p>
     </div>
   </div>
@@ -736,7 +858,7 @@ html = f"""<!DOCTYPE html>
       <thead class="table-dark">
         <tr>
           <th>Intent / Mode</th><th class="text-center">Cases</th>
-          <th class="text-center">Relevancy</th><th class="text-center">Correctness</th><th class="text-center">Similarity</th><th class="text-center">Result</th>
+          {_metric_table_headers()}<th class="text-center">Result</th>
         </tr>
       </thead>
       <tbody>{intent_summary_rows}</tbody>
@@ -748,7 +870,7 @@ html = f"""<!DOCTYPE html>
       <thead class="table-dark">
         <tr>
           <th>Type</th><th class="text-center">Count</th>
-          <th class="text-center">Relevancy</th><th class="text-center">Correctness</th><th class="text-center">Similarity</th><th class="text-center">Result</th>
+          {_metric_table_headers()}<th class="text-center">Result</th>
         </tr>
       </thead>
       <tbody>{type_summary_rows}</tbody>
@@ -761,7 +883,7 @@ html = f"""<!DOCTYPE html>
         <thead class="table-dark">
           <tr>
             <th>ID</th><th>Question</th><th>Intent</th><th>Type</th><th>Source</th>
-            <th>Relevancy</th><th>Correctness</th><th>Similarity</th><th>Result</th>
+            {_metric_table_headers()}<th>Result</th>
           </tr>
         </thead>
         <tbody>{question_rows}</tbody>
@@ -774,8 +896,8 @@ html = f"""<!DOCTYPE html>
 
     <hr class="my-4">
     <p class="text-muted small text-center">
-      YourAI RAGAs Evaluation &nbsp;·&nbsp; Tier 1 (no retrieval) &nbsp;·&nbsp;
-      Metrics: answer_relevancy, answer_correctness, answer_similarity &nbsp;·&nbsp;
+      YourAI RAGAs + DeepEval Evaluation &nbsp;·&nbsp; {tier_footer} &nbsp;·&nbsp;
+      Metrics: {metrics_footer} &nbsp;·&nbsp;
       Pass threshold: {PASS_THRESHOLD}
     </p>
   </div>

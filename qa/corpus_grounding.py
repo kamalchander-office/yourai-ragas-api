@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from qa.intent_compatibility import intent_task_instruction
 from qa.local_documents import DocumentContext
 
 INSUFFICIENT = "INSUFFICIENT_CONTEXT"
@@ -55,6 +56,45 @@ def fill_ground_truth_prompt(case: dict, doc: DocumentContext | None) -> str:
         "- Do not hedge excessively — give a real answer\n"
         "- If the question asks about harmful/illegal activity, explain why it cannot be helped\n"
         "\nAnswer:"
+    )
+
+
+def _intent_block(intent: dict) -> str:
+    keywords = intent.get("trigger_keywords") or []
+    parts = [
+        f"Intent key: {intent.get('key', '')}",
+        f"Intent name: {intent.get('name', '')}",
+    ]
+    if keywords:
+        parts.append(f"Trigger keywords (use naturally in questions): {', '.join(keywords)}")
+    if intent.get("tone_prompt"):
+        parts.append(f"Tone prompt: {intent['tone_prompt']}")
+    if intent.get("custom_instruction"):
+        parts.append(f"Custom instruction: {intent['custom_instruction']}")
+    if intent.get("opening_behaviour"):
+        parts.append(f"Opening behaviour: {intent['opening_behaviour']}")
+    return "\n".join(parts)
+
+
+def intent_document_case_generation_prompt(
+    case_type: str,
+    count: int,
+    doc: DocumentContext,
+    intent: dict,
+    existing_questions: str,
+) -> str:
+    """Generate test cases grounded in document + PWA intent metadata."""
+    base = document_case_generation_prompt(case_type, count, doc, existing_questions)
+    intent_key = (intent.get("key") or "").strip().upper()
+    task_rules = intent_task_instruction(intent_key)
+    return (
+        f"{base}\n\n"
+        "Target intent for these questions:\n"
+        f"{_intent_block(intent)}\n\n"
+        "INTENT TASK (required):\n"
+        f"{task_rules}\n\n"
+        "Each question must match this intent's task AND be answerable from the document "
+        "(or a polite refusal for negative/adversarial). Use trigger keywords where natural.\n"
     )
 
 

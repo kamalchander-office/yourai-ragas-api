@@ -44,10 +44,9 @@ def collect_with_yourai_api(
             log.warning("Skipping case %s: empty question", tc.get("id"))
             continue
 
-        print(f"  [{i}/{len(test_cases)}] {tc['id']}: {question[:60]}...")
-
-        # intent from test_cases.json → API intent_id (per curl body)
-        intent_id = (tc.get("intent_id") or tc.get("intent") or "").strip()
+        intent_id = (tc.get("intent_id") or "").strip()
+        intent_key = tc.get("intent_key") or tc.get("intent") or ""
+        print(f"  [{i}/{len(test_cases)}] {tc['id']} [{intent_key}]: {question[:50]}...")
         retrieval_mode = tc.get("retrieval_mode")
         # Same thread for whole run unless a case sets its own conversation_id
         conversation_id = tc.get("conversation_id") or shared_conversation_id or None

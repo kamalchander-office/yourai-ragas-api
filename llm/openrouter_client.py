@@ -43,6 +43,7 @@ def generate(
         "model": config.OPENROUTER_MODEL,
         "messages": messages,
         "temperature": temperature,
+        "max_tokens": config.OPENROUTER_MAX_TOKENS,
     }
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}

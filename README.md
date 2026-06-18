@@ -1,3 +1,31 @@
+## QA PWA automated flow (recommended)
+
+Target: `https://app-qa.yourai.com` — PWA API login (`YOURAI_PWA_*` in `.env`), chat via `API_BACKEND=pwa`.
+
+```bash
+cd /Users/appinvenitv/Downloads/yourai-ragas-api
+
+# 1. Add to .env: YOURAI_PWA_LOGIN_EMAIL, YOURAI_PWA_LOGIN_PASSWORD, YOURAI_PWA_OTP_BYPASS=999999
+
+# 2. Test login: python3 qa/pwa_login.py
+
+# 3. Bootstrap: new chat + upload doc + scope + fetch intents → qa/session.json
+python3 qa/bootstrap_session.py --document documents/CaseFile.docx
+
+# 3. Generate test cases from document + intent keywords
+python3 qa/generate_cases.py --from-session --refill-ground-truth --types positive --count 3
+
+# 4. Collect answers (same conversation + document from session)
+python3 qa/client.py --backend pwa
+
+# 5. Score
+python3 qa/run_eval.py
+```
+
+See `YOURAI_PWA_API_FLOW_SPEC.md` for API details.
+
+---
+
 Part B — Run the pipeline (every test run)
 All commands assume you are in the qa folder after step 1.
 

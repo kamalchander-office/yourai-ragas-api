@@ -19,6 +19,18 @@ def test_load_txt_fixture(tmp_path):
     assert ctx.document_id == "sample"
 
 
+def test_load_misnamed_plain_text_docx(tmp_path):
+    docs = tmp_path / "documents"
+    docs.mkdir()
+    (docs / "CaseFile.docx").write_text(
+        "Miranda warnings apply before custodial interrogation.",
+        encoding="utf-8",
+    )
+    store = LocalDocumentStore(docs)
+    ctx = store.load_by_filename("CaseFile.docx")
+    assert "Miranda" in ctx.text
+
+
 def test_manifest_maps_document_id(tmp_path):
     docs = tmp_path / "documents"
     docs.mkdir()

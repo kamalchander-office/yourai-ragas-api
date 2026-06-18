@@ -19,12 +19,15 @@ _METADATA_KEYS = (
     "ground_truth",
     "case_type",
     "intent",
+    "intent_key",
     "source",
     "intent_id",
     "retrieval_mode",
     "document_id",
     "expected_doc_id",
     "document_file",
+    "reference_contexts",
+    "evaluation_mode",
 )
 
 

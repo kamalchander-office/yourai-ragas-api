@@ -15,6 +15,11 @@ wheels/
 # Secrets — never commit these
 .env
 
+# PWA session (conversation/document/intent ids from bootstrap)
+qa/session.json
+# Cached PWA auth cookies (auto-written after login)
+qa/.pwa_auth.json
+
 # Local QA fixtures (keep README + manifest example in git)
 documents/*
 !documents/README.md

@@ -95,7 +95,7 @@ class LocalDocumentStore:
 
         data = path.read_bytes()
         if suffix == ".docx":
-            text = self._extract_docx(data)
+            text = self._extract_docx(data, path.name)
         else:
             mime = "application/pdf" if suffix == ".pdf" else "text/plain"
             text = extract_text_from_bytes(
@@ -121,13 +121,32 @@ class LocalDocumentStore:
         )
 
     @staticmethod
-    def _extract_docx(data: bytes) -> str:
+    def _extract_docx(data: bytes, filename: str = "document.docx") -> str:
         import io
+        import zipfile
 
-        from docx import Document
+        if data[:2] != b"PK":
+            log.warning(
+                "%s has .docx extension but is not a Word file; reading as plain text",
+                filename,
+            )
+            return extract_text_from_bytes(
+                data, filename=filename, content_type="text/plain"
+            )
 
-        doc = Document(io.BytesIO(data))
-        return "\n\n".join(p.text.strip() for p in doc.paragraphs if p.text.strip())
+        try:
+            from docx import Document
+
+            doc = Document(io.BytesIO(data))
+            return "\n\n".join(p.text.strip() for p in doc.paragraphs if p.text.strip())
+        except zipfile.BadZipFile:
+            log.warning(
+                "%s is not a valid .docx zip archive; reading as plain text",
+                filename,
+            )
+            return extract_text_from_bytes(
+                data, filename=filename, content_type="text/plain"
+            )
 
     def _resolve_path(self, filename: str) -> Path:
         name = filename.strip()

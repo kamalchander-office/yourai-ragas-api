@@ -148,8 +148,13 @@ def build_case(row: dict, idx: int) -> dict:
     if case_type not in VALID_TYPES:
         case_type = "positive"   # default to positive if unrecognised value
 
-    # Get intent — which YourAI mode this question tests
-    intent = row.get("intent", "General Chat").strip()
+    # Intent — human label and/or platform key (intent_id UUID set after bootstrap via session.json)
+    intent_key = (
+        row.get("intent_key")
+        or row.get("intent key")
+        or ""
+    ).strip()
+    intent = (row.get("intent") or intent_key.replace("_", " ").title() or "General Chat").strip()
 
     case = {
         "id":           case_id,
@@ -157,9 +162,10 @@ def build_case(row: dict, idx: int) -> dict:
         "ground_truth": ground_truth,  # may be empty — generate_cases.py will fill it
         "case_type":    case_type,
         "intent":       intent,
-        "intent_id":    intent,       # YourAI API field (client.py sends this)
         "source":       "human",       # these came from a human-written doc
     }
+    if intent_key:
+        case["intent_key"] = intent_key.upper()
     doc_file = (
         row.get("document_file")
         or row.get("document")
@@ -368,6 +374,22 @@ else:
 #
 # json.dumps converts the Python list of dicts into a JSON string.
 # indent=2 makes it human-readable (nicely indented) rather than one long line.
+
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+try:
+    from qa.session_store import bind_intents_to_cases
+
+    bound, misses = bind_intents_to_cases(final, default_if_missing=True)
+    if bound:
+        print(f"  Intents bound from session.json: {bound}/{len(final)} case(s)")
+    if misses:
+        print(f"  ⚠ Could not map intent for: {', '.join(misses[:5])}")
+        if len(misses) > 5:
+            print(f"    … and {len(misses) - 5} more (use intent_key column in Excel)")
+except FileNotFoundError:
+    print("  (No qa/session.json — run bootstrap_session.py to bind intent UUIDs)")
 
 OUT_FILE.write_text(json.dumps(final, indent=2))
 print(f"\n✓ Saved → {OUT_FILE}")

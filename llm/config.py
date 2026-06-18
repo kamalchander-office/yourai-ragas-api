@@ -29,6 +29,8 @@ OPENROUTER_BASE_URL = os.getenv(
     "OPENROUTER_BASE_URL",
     "https://openrouter.ai/api/v1",
 )
+# OpenRouter bills against max_tokens; keep low for judge/JSON tasks (default SDK ≈ 16384).
+OPENROUTER_MAX_TOKENS = int(os.getenv("OPENROUTER_MAX_TOKENS", "4096"))
 
-# Optional: separate provider for RAGAs judge in run_eval.py (defaults to LLM_PROVIDER)
+# Optional: separate provider for RAGAs + DeepEval judge in run_eval.py (defaults to LLM_PROVIDER)
 JUDGE_PROVIDER = os.getenv("JUDGE_PROVIDER", LLM_PROVIDER).strip().lower()
