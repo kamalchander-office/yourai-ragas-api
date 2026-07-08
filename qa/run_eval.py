@@ -119,10 +119,18 @@ _eval_args = _eval_parser.parse_args()
 
 # ── STEP 2: FILE PATHS ────────────────────────────────────────────────────────
 
-QA_DIR       = Path(__file__).parent
-RESULTS_FILE = QA_DIR / "results.json"   # input — produced by client.py
-SCORES_CSV   = QA_DIR / "scores.csv"     # output — raw scores for Excel/Sheets
-REPORT_HTML  = QA_DIR / "report.html"    # output — formatted report for browser
+from qa.paths import (
+    REPORT_HTML,
+    RESULTS_FILE,
+    SCORES_CSV,
+    ensure_results_dir,
+    migrate_legacy_outputs,
+)
+
+_migrated = migrate_legacy_outputs()
+if _migrated:
+    print(f"Migrated legacy outputs → qa/results/: {', '.join(_migrated)}")
+ensure_results_dir()
 
 
 # ── STEP 3: LOAD RESULTS ──────────────────────────────────────────────────────

@@ -19,7 +19,7 @@ from yourai_pwa.client import YourAIPWAClient
 from yourai_pwa.config import PWAConfig, load_pwa_config
 
 from qa.collectors.base import build_result_row
-from qa.session_store import load_session, resolve_intent_id
+from qa.session_store import get_session_scope, load_session, resolve_intent_id
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +37,16 @@ def collect_with_pwa_api(
     config = load_pwa_config()
     client = YourAIPWAClient(config)
 
-    document_id = session["document"]["id"]
+    scope = get_session_scope(session)
+    document_ids = scope["document_ids"]
+    folder_id = scope.get("folder_id")
+    primary_document_id = scope.get("primary_document_id") or (document_ids[0] if document_ids else "")
+
+    if not document_ids and not folder_id:
+        raise YourAIResponseError(
+            "session.json has no vault attachment — run bootstrap_session.py "
+            "(upload or vault pick)."
+        )
     if fresh_conversation_per_case is None:
         fresh_conversation_per_case = os.getenv(
             "YOURAI_PWA_FRESH_CONVERSATION_PER_CASE", "true"
@@ -45,7 +54,8 @@ def collect_with_pwa_api(
     pause = sleep_seconds if sleep_seconds is not None else _DEFAULT_COLLECT_SLEEP
 
     print(f"  PWA session: {session.get('base_url')}")
-    print(f"  document     : {document_id}")
+    print(f"  document_ids : {', '.join(document_ids) if document_ids else '—'}")
+    print(f"  folder_id    : {folder_id or '—'}")
     print(
         f"  mode         : "
         f"{'fresh conversation per case' if fresh_conversation_per_case else 'reuse session conversation'}\n"
@@ -68,11 +78,19 @@ def collect_with_pwa_api(
 
         if fresh_conversation_per_case:
             conversation_id = client.start_conversation(reuse=False)
-            client.set_conversation_scope(conversation_id, document_id)
+            client.set_conversation_scope_vault(
+                conversation_id,
+                document_ids=document_ids,
+                folder_id=folder_id,
+            )
         else:
             conversation_id = session["conversation_id"]
             if i == 1:
-                client.set_conversation_scope(conversation_id, document_id)
+                client.set_conversation_scope_vault(
+                    conversation_id,
+                    document_ids=document_ids,
+                    folder_id=folder_id,
+                )
 
         intent_key = tc.get("intent_key") or tc.get("intent") or intent_id[:8]
         print(f"  [{i}/{len(test_cases)}] {tc['id']} [{intent_key}]: {question[:50]}...")
@@ -99,8 +117,10 @@ def collect_with_pwa_api(
             normalized["intent_id"] = intent_id
 
             row = build_result_row(tc, normalized)
-            row["document_id"] = document_id
-            row["expected_doc_id"] = document_id
+            row["document_id"] = tc.get("document_id") or primary_document_id
+            row["expected_doc_id"] = tc.get("expected_doc_id") or primary_document_id
+            row["folder_id"] = folder_id or ""
+            row["scope_document_ids"] = document_ids
             row["intent_id"] = intent_id
             row["intent_key"] = tc.get("intent_key") or ""
             results.append(row)

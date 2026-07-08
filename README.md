@@ -50,7 +50,7 @@ python3 client.py --backend yourai
 Expected:
 
 Progress per case: ✓ Answer received (... chars, ...ms)
-File created: qa/results.json
+File created: qa/results/results.json
 You do not need main.py running for this step.
 
 If it fails:
@@ -62,8 +62,8 @@ Step 6: Score answers and build report
 python3 run_eval.py
 Expected:
 
-qa/scores.csv
-qa/report.html — open in a browser
+qa/results/scores.csv
+qa/results/report.html — open in a browser
 Takes a few minutes (RAGAs calls the judge LLM per case).
 
 Quick reference
@@ -72,6 +72,6 @@ TestCases.xlsx
 test_cases.json
     ↓  generate_cases.py (optional)
     ↓  client.py --backend yourai
-results.json
+qa/results/results.json
     ↓  run_eval.py
-scores.csv + report.html
+qa/results/scores.csv + qa/results/report.html

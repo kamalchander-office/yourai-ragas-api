@@ -20,6 +20,12 @@ from yourai_pwa.auth import (
 from yourai_pwa.config import PWAConfig, load_pwa_config
 from yourai_pwa.intents import parse_intents_response
 from yourai_pwa.response import normalize_chat_response
+from yourai_pwa.vault import (
+    document_is_ready,
+    parse_document_id_from_url,
+    vault_folder_list_data,
+    vault_list_data,
+)
 
 log = logging.getLogger(__name__)
 
@@ -232,6 +238,165 @@ class YourAIPWAClient:
             f"Last state: {last}"
         )
 
+    def list_vault_documents(
+        self,
+        *,
+        page: int = 1,
+        limit: int = 100,
+        tab: str = "ALL",
+        folder_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        query = f"/vault?page={page}&limit={limit}&tab={tab}"
+        if folder_id:
+            query += f"&folderId={folder_id}"
+        body = self._request("GET", query)
+        return vault_list_data(body)
+
+    def get_vault_document(self, document_id: str) -> dict[str, Any]:
+        body = self._request("GET", f"/vault/{document_id}")
+        data = body.get("data") if isinstance(body.get("data"), dict) else body
+        if not isinstance(data, dict):
+            raise YourAIResponseError(f"GET /vault/{document_id} returned unexpected body")
+        return data
+
+    def list_vault_folders(self) -> list[dict[str, Any]]:
+        body = self._request("GET", "/vault/folders")
+        return vault_folder_list_data(body)
+
+    def download_url(self, url: str) -> bytes:
+        """Download bytes from a vault media fileUrl (uses PWA cookie session)."""
+        ensure_authenticated(self._session, self.config)
+        try:
+            response = self._session.get(url, timeout=self.config.timeout_seconds)
+        except requests.RequestException as e:
+            raise YourAINetworkError(f"Download failed for {url[:80]}: {e}") from e
+        if response.status_code != 200:
+            raise YourAIResponseError(
+                f"Download HTTP {response.status_code} for {url[:80]}: {response.text[:200]}"
+            )
+        return response.content
+
+    @staticmethod
+    def _match_token(value: str, candidate: str) -> bool:
+        left = value.strip().lower()
+        right = candidate.strip().lower()
+        return left == right or left in right or right in left
+
+    def resolve_vault_documents(
+        self,
+        *,
+        document_ids: list[str] | None = None,
+        document_names: list[str] | None = None,
+        file_urls: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Resolve vault records by UUID, display name, or media URL."""
+        wanted_ids: list[str] = [d.strip() for d in (document_ids or []) if d.strip()]
+        for url in file_urls or []:
+            parsed = parse_document_id_from_url(url)
+            if parsed and parsed not in wanted_ids:
+                wanted_ids.append(parsed)
+
+        wanted_names = [n.strip() for n in (document_names or []) if n.strip()]
+        if not wanted_ids and not wanted_names:
+            return []
+
+        all_docs = self.list_vault_documents(limit=100)
+        by_id = {str(d.get("id")): d for d in all_docs if d.get("id")}
+
+        resolved: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        for doc_id in wanted_ids:
+            doc = by_id.get(doc_id)
+            if not doc:
+                try:
+                    doc = self.get_vault_document(doc_id)
+                except YourAIResponseError:
+                    doc = None
+            if not doc:
+                raise YourAIResponseError(f"Vault document not found: {doc_id}")
+            if doc_id not in seen:
+                resolved.append(doc)
+                seen.add(doc_id)
+
+        for name in wanted_names:
+            matches = [
+                d
+                for d in all_docs
+                if self._match_token(name, str(d.get("name") or ""))
+            ]
+            if not matches:
+                raise YourAIResponseError(f"Vault document name not found: {name!r}")
+            if len(matches) > 1:
+                log.warning(
+                    "Multiple vault documents match name %r — using first (id=%s)",
+                    name,
+                    matches[0].get("id"),
+                )
+            doc = matches[0]
+            doc_id = str(doc.get("id"))
+            if doc_id not in seen:
+                resolved.append(doc)
+                seen.add(doc_id)
+
+        return resolved
+
+    def resolve_vault_folder(
+        self,
+        *,
+        folder_id: str | None = None,
+        folder_name: str | None = None,
+    ) -> dict[str, Any] | None:
+        fid = (folder_id or "").strip()
+        fname = (folder_name or "").strip()
+        if not fid and not fname:
+            return None
+
+        folders = self.list_vault_folders()
+        if fid:
+            for folder in folders:
+                if str(folder.get("id")) == fid:
+                    return folder
+            raise YourAIResponseError(f"Vault folder not found: {fid}")
+
+        matches = [
+            f
+            for f in folders
+            if self._match_token(fname, str(f.get("name") or ""))
+        ]
+        if not matches:
+            raise YourAIResponseError(f"Vault folder name not found: {fname!r}")
+        if len(matches) > 1:
+            log.warning(
+                "Multiple vault folders match name %r — using first (id=%s)",
+                fname,
+                matches[0].get("id"),
+            )
+        return matches[0]
+
+    def set_conversation_scope_vault(
+        self,
+        conversation_id: str,
+        *,
+        document_ids: list[str] | None = None,
+        folder_id: str | None = None,
+        active_vault_document_id: str | None = None,
+        knowledge_pack_ids: list[str] | None = None,
+    ) -> None:
+        """Attach vault document(s) and/or a folder to conversation scope."""
+        doc_ids = [d.strip() for d in (document_ids or []) if d.strip()]
+        payload: dict[str, Any] = {
+            "document_ids": doc_ids,
+            "attached_document_ids": doc_ids,
+            "active_vault_document_id": active_vault_document_id,
+            "knowledge_pack_ids": knowledge_pack_ids or [],
+        }
+        if folder_id:
+            payload["folderId"] = folder_id.strip()
+        if not doc_ids and not folder_id:
+            raise ValueError("set_conversation_scope_vault requires document_ids and/or folder_id")
+        self._request("POST", f"/conversations/{conversation_id}/scope", json_body=payload)
+
     def set_conversation_scope(
         self,
         conversation_id: str,
@@ -239,13 +404,11 @@ class YourAIPWAClient:
         *,
         knowledge_pack_ids: list[str] | None = None,
     ) -> None:
-        payload = {
-            "document_ids": [document_id],
-            "attached_document_ids": [document_id],
-            "active_vault_document_id": None,
-            "knowledge_pack_ids": knowledge_pack_ids or [],
-        }
-        self._request("POST", f"/conversations/{conversation_id}/scope", json_body=payload)
+        self.set_conversation_scope_vault(
+            conversation_id,
+            document_ids=[document_id],
+            knowledge_pack_ids=knowledge_pack_ids,
+        )
 
     def chat(
         self,

@@ -22,7 +22,7 @@ from qa.align import align_result_row
 from qa.corpus_grounding import resolve_document_for_case
 
 QA_DIR = Path(__file__).parent
-SESSION_FILE = QA_DIR / "session.json"
+from qa.paths import SESSION_FILE
 REFERENCE_CONTEXT_MAX_CHARS = 8000
 
 # RAGAs metrics (six).

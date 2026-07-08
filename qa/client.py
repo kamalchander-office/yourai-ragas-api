@@ -45,9 +45,13 @@ logging.basicConfig(
 )
 log = logging.getLogger("qa.client")
 
-QA_DIR = Path(__file__).parent
-TEST_CASES_FILE = QA_DIR / "test_cases.json"
-RESULTS_FILE = QA_DIR / "results.json"
+from qa.paths import (
+    INELIGIBLE_CASES_FILE,
+    RESULTS_FILE,
+    TEST_CASES_FILE,
+    ensure_results_dir,
+    migrate_legacy_outputs,
+)
 
 parser = argparse.ArgumentParser(description="Collect YourAI answers for evaluation.")
 parser.add_argument(
@@ -132,6 +136,11 @@ def _filter_harness_eligible(cases: list[dict]) -> list[dict]:
 
 
 def main() -> None:
+    migrated = migrate_legacy_outputs()
+    if migrated:
+        print(f"Migrated legacy outputs → qa/results/: {', '.join(migrated)}")
+    ensure_results_dir()
+
     test_cases = json.loads(TEST_CASES_FILE.read_text())
     test_cases = _filter_harness_eligible(test_cases)
     if args.limit is not None and args.limit > 0:

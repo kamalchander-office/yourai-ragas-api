@@ -14,18 +14,17 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from qa.align import find_alignment_errors
-
-QA_DIR = Path(__file__).parent
+from qa.paths import RESULTS_FILE, TEST_CASES_FILE, migrate_legacy_outputs
 
 
 def main() -> None:
-    tc_path = QA_DIR / "test_cases.json"
-    res_path = QA_DIR / "results.json"
-    if not tc_path.exists() or not res_path.exists():
-        sys.exit("ERROR: need both qa/test_cases.json and qa/results.json")
+    migrate_legacy_outputs()
 
-    test_cases = json.loads(tc_path.read_text())
-    results = json.loads(res_path.read_text())
+    if not TEST_CASES_FILE.exists() or not RESULTS_FILE.exists():
+        sys.exit(f"ERROR: need both {TEST_CASES_FILE} and {RESULTS_FILE}")
+
+    test_cases = json.loads(TEST_CASES_FILE.read_text())
+    results = json.loads(RESULTS_FILE.read_text())
     errors = find_alignment_errors(results, test_cases)
 
     if not errors:
@@ -34,10 +33,8 @@ def main() -> None:
 
     print(f"✗ Found {len(errors)} alignment issue(s):\n")
     for msg in errors:
-        print(msg)
-        print()
-    print("Fix:  python3 qa/align_results.py")
-    print("      or python3 qa/client.py --align-only")
+        print(f"  • {msg.splitlines()[0]}")
+    print("\nFix:  python3 qa/align_results.py")
     sys.exit(1)
 
 

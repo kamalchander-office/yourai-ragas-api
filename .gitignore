@@ -19,6 +19,9 @@ wheels/
 qa/session.json
 # Cached PWA auth cookies (auto-written after login)
 qa/.pwa_auth.json
+# Pipeline outputs (results, scores, reports, vault text cache)
+qa/results/*
+!qa/results/README.md
 
 # Local QA fixtures (keep README + manifest example in git)
 documents/*

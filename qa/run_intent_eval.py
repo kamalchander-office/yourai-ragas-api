@@ -40,11 +40,17 @@ from qa.intent_compliance import (
 from qa.intent_eval_format import CSV_COLUMNS, case_to_csv_row
 from qa.intent_eval_summary import build_summary
 from qa.intent_prompts import extract_intent_prompts, has_any_prompt
+from qa.paths import (
+    INTENT_EVAL_ISSUES_CSV,
+    INTENT_EVAL_SUMMARY_JSON,
+    RESULTS_FILE,
+    ensure_results_dir,
+    migrate_legacy_outputs,
+)
 from qa.session_store import find_platform_intent, load_session
 
-RESULTS_FILE = QA_DIR / "results.json"
-ISSUES_CSV = QA_DIR / "intent_eval_issues.csv"
-SUMMARY_JSON = QA_DIR / "intent_eval_summary.json"
+ISSUES_CSV = INTENT_EVAL_ISSUES_CSV
+SUMMARY_JSON = INTENT_EVAL_SUMMARY_JSON
 
 
 def _validate_judge_keys() -> None:
@@ -72,6 +78,11 @@ def main() -> None:
     args = parser.parse_args()
 
     _validate_judge_keys()
+
+    migrated = migrate_legacy_outputs()
+    if migrated:
+        print(f"Migrated legacy outputs → qa/results/: {', '.join(migrated)}")
+    ensure_results_dir()
 
     if not RESULTS_FILE.exists():
         sys.exit(f"ERROR: {RESULTS_FILE} not found. Run client.py first.")

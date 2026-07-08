@@ -11,8 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-QA_DIR = Path(__file__).parent
-TEST_CASES_FILE = QA_DIR / "test_cases.json"
+from qa.paths import TEST_CASES_FILE
 
 _METADATA_KEYS = (
     "question",

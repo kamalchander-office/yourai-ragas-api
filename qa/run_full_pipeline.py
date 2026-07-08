@@ -23,7 +23,7 @@
 ║  PIPELINE STEPS (in order)                                                   ║
 ║  ─────────────────────────                                                   ║
 ║  Step 1  Test PWA login          → pwa_login.py                              ║
-║  Step 2  Bootstrap session       → bootstrap_session.py (upload doc, intents)  ║
+║  Step 2  Bootstrap session       → bootstrap_session.py (upload or vault pick) ║
 ║  Step 3  Import Excel/Word cases → ingest_cases.py                           ║
 ║  Step 4  Generate / fill GT      → generate_cases.py (doc → intent filter)  ║
 ║  Step 5  Collect API answers     → client.py                                 ║
@@ -40,6 +40,20 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from qa.paths import (
+    QA_DIR,
+    RESULTS_DIR,
+    ROOT,
+    SESSION_FILE,
+    TEST_CASES_FILE,
+    ensure_results_dir,
+    migrate_legacy_outputs,
+)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIG — edit these values for your run (CLI --limit overrides LIMIT below)
@@ -73,12 +87,22 @@ from pathlib import Path
 #     RUN_STEP_6_RAGAS_EVAL = True
 #     RUN_STEP_7_INTENT_EVAL = True
 #
-# ► One document — full E2E (recommended):
+# ► Vault pick — attach existing YourVault doc(s) + optional folder (no upload):
+#     BOOTSTRAP_MODE = "vault"
+#     VAULT_DOCUMENT_IDS = "acf2061e-...,ebdc511f-..."
+#     VAULT_FOLDER_NAME = "Discovery Documents"
+#     # Or use names / media URLs:
+#     # VAULT_DOCUMENT_NAMES = "CaseFile"
+#     # VAULT_FILE_URLS = "https://media-qa.yourai.com/documents/{uuid}/file.docx"
+#     RUN_STEP_2_BOOTSTRAP = True
+#     GENERATE_FROM_SESSION = True
+#
+# ► One document — full E2E (recommended, upload mode):
 #     GENERATE_FROM_SESSION = True
 #     GENERATE_COUNT = 2
 #     Step 4 analyses the document and generates cases ONLY for compatible intents.
 #     FIND_DOCUMENT is always skipped (manual QA). Incompatible Excel rows go to
-#     qa/test_cases_ineligible.json.
+#     qa/results/test_cases_ineligible.json.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # How many test cases to run for collect + both evaluators (Steps 5–7).
@@ -92,7 +116,20 @@ LIMIT: int | None = 11
 #   "mock"   → local main.py mock server
 BACKEND = "pwa"
 
-# Document for PWA bootstrap (Step 2) — uploaded to vault, linked in session.json
+# ── Step 2: bootstrap mode ────────────────────────────────────────────────────
+#   "upload" → upload local DOCUMENT to vault (legacy — unchanged behaviour)
+#   "vault"  → pick existing YourVault doc(s) / folder (no local upload)
+BOOTSTRAP_MODE = "upload"
+
+# Vault pick (BOOTSTRAP_MODE = "vault") — comma-separated; all optional but need
+# at least one document id/name/url OR a folder id/name.
+VAULT_DOCUMENT_IDS = ""
+VAULT_DOCUMENT_NAMES = ""
+VAULT_FILE_URLS = ""
+VAULT_FOLDER_ID = ""
+VAULT_FOLDER_NAME = ""
+
+# Upload mode only (BOOTSTRAP_MODE = "upload")
 DOCUMENT = "documents/CaseFile.docx"
 
 # Excel/Word source for human-written test cases (Step 3)
@@ -111,6 +148,9 @@ RUN_STEP_7_INTENT_EVAL = True
 # ── Step 2: bootstrap_session.py options ─────────────────────────────────────
 BOOTSTRAP_REUSE_CHAT = False      # True = reuse conversation; False = fresh chat
 BOOTSTRAP_DEFAULT_INTENT = "GENERAL_CHAT"
+
+# All pipeline outputs land in qa/results/ (see qa/paths.py)
+# Override with QA_RESULTS_DIR in .env if needed.
 
 # ── Step 4: generate_cases.py options (only if RUN_STEP_4_GENERATE = True) ───
 # Mode A — generate from PWA session (needs session.json from Step 2):
@@ -138,8 +178,6 @@ RAGAS_REPORT_ONLY = False         # True = rebuild report.html from scores.csv o
 # End of CONFIG — usually no need to edit below this line
 # ═══════════════════════════════════════════════════════════════════════════════
 
-ROOT = Path(__file__).resolve().parent.parent
-QA_DIR = Path(__file__).resolve().parent
 PYTHON = sys.executable
 
 
@@ -179,10 +217,26 @@ def _preflight(limit: int | None, *, root: Path = ROOT) -> None:
 
     doc = root / DOCUMENT if not Path(DOCUMENT).is_absolute() else Path(DOCUMENT)
     ingest = root / INGEST_FILE if not Path(INGEST_FILE).is_absolute() else Path(INGEST_FILE)
-    session_path = QA_DIR / "session.json"
+    session_path = SESSION_FILE
 
-    if RUN_STEP_2_BOOTSTRAP and not doc.is_file():
+    if RUN_STEP_2_BOOTSTRAP and BOOTSTRAP_MODE == "upload" and not doc.is_file():
         errors.append(f"Bootstrap document not found: {doc}")
+
+    if RUN_STEP_2_BOOTSTRAP and BOOTSTRAP_MODE == "vault":
+        has_doc = any(
+            str(v).strip()
+            for v in (
+                VAULT_DOCUMENT_IDS,
+                VAULT_DOCUMENT_NAMES,
+                VAULT_FILE_URLS,
+            )
+        )
+        has_folder = bool(str(VAULT_FOLDER_ID).strip() or str(VAULT_FOLDER_NAME).strip())
+        if not has_doc and not has_folder:
+            errors.append(
+                "BOOTSTRAP_MODE=vault requires VAULT_DOCUMENT_IDS, VAULT_DOCUMENT_NAMES, "
+                "VAULT_FILE_URLS, and/or VAULT_FOLDER_ID / VAULT_FOLDER_NAME in CONFIG."
+            )
 
     if RUN_STEP_3_INGEST and not ingest.is_file():
         errors.append(f"Ingest file not found: {ingest}")
@@ -242,7 +296,7 @@ def _preflight(limit: int | None, *, root: Path = ROOT) -> None:
 
                 session_data = json.loads(session_path.read_text())
                 profile = session_data.get("document_profile")
-                if not profile and doc.is_file():
+                if not profile and BOOTSTRAP_MODE == "upload" and doc.is_file():
                     # Estimate from local file before Step 4 runs
                     try:
                         from yourai_chat.document_text import extract_text_from_bytes
@@ -297,7 +351,18 @@ def _preflight(limit: int | None, *, root: Path = ROOT) -> None:
 
     print("\nPreflight OK:")
     if RUN_STEP_2_BOOTSTRAP:
-        print(f"  document   : {doc}")
+        if BOOTSTRAP_MODE == "vault":
+            print(f"  bootstrap  : vault pick")
+            if VAULT_DOCUMENT_IDS:
+                print(f"  doc ids    : {VAULT_DOCUMENT_IDS}")
+            if VAULT_DOCUMENT_NAMES:
+                print(f"  doc names  : {VAULT_DOCUMENT_NAMES}")
+            if VAULT_FILE_URLS:
+                print(f"  file urls  : {VAULT_FILE_URLS[:80]}...")
+            if VAULT_FOLDER_ID or VAULT_FOLDER_NAME:
+                print(f"  folder     : {VAULT_FOLDER_ID or VAULT_FOLDER_NAME}")
+        else:
+            print(f"  document   : {doc}")
     if RUN_STEP_3_INGEST:
         print(f"  ingest     : {ingest} ({ingest_rows or '?'} row(s))")
     if intent_count:
@@ -320,14 +385,41 @@ def build_pipeline_commands(limit: int | None, *, root: Path = ROOT) -> list[tup
 
     if RUN_STEP_2_BOOTSTRAP:
         n += 1
-        cmd = [
-            PYTHON, "bootstrap_session.py",
-            "--document", str(doc),
-            "--default-intent", BOOTSTRAP_DEFAULT_INTENT,
-        ]
+        if BOOTSTRAP_MODE == "vault":
+            cmd = [
+                PYTHON,
+                "bootstrap_session.py",
+                "--mode",
+                "vault",
+                "--default-intent",
+                BOOTSTRAP_DEFAULT_INTENT,
+            ]
+            if VAULT_DOCUMENT_IDS.strip():
+                cmd.extend(["--vault-document-ids", VAULT_DOCUMENT_IDS.strip()])
+            if VAULT_DOCUMENT_NAMES.strip():
+                cmd.extend(["--vault-document-names", VAULT_DOCUMENT_NAMES.strip()])
+            if VAULT_FILE_URLS.strip():
+                cmd.extend(["--vault-file-urls", VAULT_FILE_URLS.strip()])
+            if VAULT_FOLDER_ID.strip():
+                cmd.extend(["--vault-folder-id", VAULT_FOLDER_ID.strip()])
+            if VAULT_FOLDER_NAME.strip():
+                cmd.extend(["--vault-folder-name", VAULT_FOLDER_NAME.strip()])
+            title = "Bootstrap PWA session — vault pick, download corpus (bootstrap_session.py)"
+        else:
+            cmd = [
+                PYTHON,
+                "bootstrap_session.py",
+                "--mode",
+                "upload",
+                "--document",
+                str(doc),
+                "--default-intent",
+                BOOTSTRAP_DEFAULT_INTENT,
+            ]
+            title = "Bootstrap PWA session — upload doc, fetch intents (bootstrap_session.py)"
         if BOOTSTRAP_REUSE_CHAT:
             cmd.append("--reuse-chat")
-        steps.append((n, "Bootstrap PWA session — upload doc, fetch intents (bootstrap_session.py)", cmd))
+        steps.append((n, title, cmd))
 
     if RUN_STEP_3_INGEST:
         n += 1
@@ -440,6 +532,10 @@ Individual commands (for manual runs):
         sys.exit("ERROR: All steps are disabled in CONFIG. Enable at least one RUN_STEP_* flag.")
 
     if not args.dry_run:
+        migrated = migrate_legacy_outputs()
+        if migrated:
+            print(f"Migrated legacy outputs → qa/results/: {', '.join(migrated)}")
+        ensure_results_dir()
         _preflight(limit)
 
     for step_num, title, cmd in steps:
@@ -453,14 +549,16 @@ Individual commands (for manual runs):
     print("PIPELINE COMPLETE")
     print("=" * 70)
     print("Outputs:")
-    print(f"  qa/session.json              — conversation, doc, intents, document_profile")
-    print(f"  qa/test_cases.json           — harness-eligible cases only")
-    print(f"  qa/test_cases_ineligible.json — Excel/AI rows skipped (wrong intent for doc)")
-    print(f"  qa/results.json              — API answers")
-    print(f"  qa/scores.csv                — RAGAs + DeepEval scores")
-    print(f"  qa/report.html               — RAGAs + DeepEval report (open in browser)")
-    print(f"  qa/intent_eval_issues.csv    — intent bugs (1 row per question)")
-    print(f"  qa/intent_eval_summary.json  — intent compliance detail")
+    print(f"  qa/session.json                   — conversation, vault attach, intents")
+    print(f"  qa/test_cases.json                — harness-eligible cases")
+    print(f"  {RESULTS_DIR.relative_to(ROOT)}/")
+    print(f"    results.json                    — API answers")
+    print(f"    scores.csv                      — RAGAs + DeepEval scores")
+    print(f"    report.html                     — RAGAs + DeepEval report")
+    print(f"    intent_eval_issues.csv          — intent bugs (1 row per question)")
+    print(f"    intent_eval_summary.json        — intent compliance detail")
+    print(f"    test_cases_ineligible.json      — skipped intent/doc rows")
+    print(f"    corpus_cache/                   — vault document text cache")
     print("=" * 70)
 
 

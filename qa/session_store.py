@@ -8,9 +8,9 @@ from pathlib import Path
 
 from yourai_pwa.intents import intent_by_key
 
+from qa.paths import SESSION_FILE, TEST_CASES_FILE
+
 QA_DIR = Path(__file__).parent
-SESSION_FILE = QA_DIR / "session.json"
-TEST_CASES_FILE = QA_DIR / "test_cases.json"
 
 # Spreadsheet labels / typos → platform intent key (from GET /knowledge-base/intents)
 _INTENT_ALIASES: dict[str, str] = {
@@ -178,3 +178,28 @@ def resolve_intent_id(session: dict, test_case: dict) -> str:
     if intent and intent.get("id"):
         return intent["id"]
     return (session.get("default_intent_id") or "").strip()
+
+
+def get_session_scope(session: dict) -> dict[str, Any]:
+    """
+    Normalized vault scope for pwa_collector.
+
+    Returns document_ids, folder_id, and primary document_id (backward compatible).
+    """
+    attachment = session.get("attachment") or {}
+    doc_ids = attachment.get("document_ids")
+    if not doc_ids:
+        legacy_id = (session.get("document") or {}).get("id")
+        doc_ids = [legacy_id] if legacy_id else []
+    doc_ids = [str(d) for d in doc_ids if d]
+
+    folder_id = attachment.get("folder_id")
+    primary = doc_ids[0] if doc_ids else (session.get("document") or {}).get("id")
+
+    return {
+        "document_ids": doc_ids,
+        "folder_id": folder_id,
+        "folder_name": attachment.get("folder_name"),
+        "primary_document_id": str(primary) if primary else None,
+    }
+

@@ -62,8 +62,12 @@ args = parser.parse_args()
 # Path().expanduser() handles ~ (home directory shortcut)
 # .resolve() converts relative paths to absolute paths
 SOURCE_FILE = Path(args.file).expanduser().resolve()
-QA_DIR      = Path(__file__).parent          # the folder this script lives in
-OUT_FILE    = QA_DIR / "test_cases.json"     # where we save the output
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from qa.paths import TEST_CASES_FILE
+
+OUT_FILE = TEST_CASES_FILE
 
 # Check the file actually exists before trying to read it
 if not SOURCE_FILE.exists():
@@ -395,7 +399,7 @@ OUT_FILE.write_text(json.dumps(final, indent=2))
 print(f"\n✓ Saved → {OUT_FILE}")
 print(f"  {len(final)} total test cases ready.")
 print(
-    "\nIf qa/results.json already exists, refresh it so questions match these ids:"
+    "\nIf qa/results/results.json already exists, refresh it so questions match these ids:"
 )
 print("  python qa/client.py --align-only    # metadata only")
 print("  python qa/client.py --backend yourai  # new API answers")

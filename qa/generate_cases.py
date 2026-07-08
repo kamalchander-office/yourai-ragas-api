@@ -51,9 +51,15 @@ from qa.intent_compatibility import (
 from qa.local_documents import DocumentContext, LocalDocumentStore
 from qa.session_store import bind_intents_to_cases, load_session, save_session
 
+from qa.paths import (
+    INELIGIBLE_CASES_FILE,
+    TEST_CASES_FILE,
+    ensure_results_dir,
+)
+
 QA_DIR = Path(__file__).parent
-OUT_FILE = QA_DIR / "test_cases.json"
-INELIGIBLE_FILE = QA_DIR / "test_cases_ineligible.json"
+OUT_FILE = TEST_CASES_FILE
+INELIGIBLE_FILE = INELIGIBLE_CASES_FILE
 
 TYPE_PROMPTS_GENERIC = {
     "positive": """
@@ -117,27 +123,44 @@ def _stamp_intent_fields(case: dict, intent: dict) -> None:
 
 def _stamp_session_fields(case: dict, session: dict) -> None:
     case["conversation_id"] = session.get("conversation_id")
-    doc = session.get("document") or {}
-    if doc.get("id"):
-        case["document_id"] = doc["id"]
-        case["expected_doc_id"] = doc["id"]
+    scope = session.get("attachment") or {}
+    doc_ids = scope.get("document_ids") or []
+    primary = (session.get("document") or {}).get("id") or (doc_ids[0] if doc_ids else "")
+    if primary:
+        case["document_id"] = primary
+        case["expected_doc_id"] = primary
+    if scope.get("folder_id"):
+        case["folder_id"] = scope["folder_id"]
+    if doc_ids:
+        case["scope_document_ids"] = doc_ids
     case["evaluation_mode"] = "pwa_session_grounded"
 
 
 def _document_from_session(session: dict) -> DocumentContext:
+    """Load corpus from session — vault download cache, combined multi-doc, or legacy upload path."""
+    from qa.vault_corpus import load_document_context_from_session
+
+    try:
+        return load_document_context_from_session(session, client=None)
+    except FileNotFoundError:
+        pass
+
+    # Legacy upload path (no vault attachment metadata)
     doc_meta = session.get("document") or {}
     local_path = Path(doc_meta.get("local_path") or "")
     if not local_path.is_file():
-        raise FileNotFoundError(f"Session document not found on disk: {local_path}")
+        raise FileNotFoundError(
+            f"Session document not found on disk: {local_path}. "
+            "Re-run bootstrap_session.py (vault or upload mode)."
+        )
 
     store = LocalDocumentStore()
     loaded = store.load_many(filenames=[local_path.name])
     if local_path.name not in loaded:
-        # load by absolute path via store internals — read text directly
         from yourai_chat.document_text import extract_text_from_bytes
 
         raw = local_path.read_bytes()
-        text = extract_text_from_bytes(raw, local_path.suffix)
+        text = extract_text_from_bytes(raw, filename=local_path.name)
         max_chars = int(os.getenv("GENERATE_MAX_DOCUMENT_CHARS", "80000"))
         truncated = len(text) > max_chars
         if truncated:
@@ -439,6 +462,7 @@ def main() -> None:
         help="With --from-session: use heuristics only (no LLM document classification)",
     )
     args = parser.parse_args()
+    ensure_results_dir()
 
     existing_cases: list[dict] = []
     if OUT_FILE.exists():
